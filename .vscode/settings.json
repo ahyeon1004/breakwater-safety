@@ -1,0 +1,11 @@
+{
+  // Live Server: AI 서버가 실행 중에 쓰는 기록·모델 파일 때문에 페이지가 계속 새로고침되지 않도록 감시 제외
+  "liveServer.settings.ignoreFiles": [
+    ".vscode/**",
+    "**/*.scss",
+    "**/*.sass",
+    "**/*.ts",
+    "ai_server/**",
+    "obs.json"
+  ]
+}
