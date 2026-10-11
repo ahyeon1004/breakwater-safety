@@ -1,0 +1,8 @@
+# Python 3.11 권장 (TensorFlow 2.15는 Python 3.9~3.11 지원, macOS Apple Silicon 포함)
+tensorflow==2.15.1
+numpy<2
+opencv-python==4.10.0.84
+flask==3.0.3
+# 사람 객체 탐지·추적 (YOLO + ByteTrack). PyTorch 가 함께 설치됨
+ultralytics==8.3.40
+lap>=0.5.12

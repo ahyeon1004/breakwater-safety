@@ -1,0 +1,62 @@
+{
+  "server": { "host": "127.0.0.1", "port": 5050 },
+
+  "cameras": [
+    {
+      "id": "CAM-01",
+      "device": "auto",
+      "name_hint": "K420",
+      "fallback": true,
+      "width": 1280,
+      "height": 720
+    },
+    {
+      "id": "CAM-02",
+      "share": "CAM-01",
+      "_설명": "카메라가 한 대뿐이라 CAM-01 캡처를 복제해 AI 분석 화면으로 씀. 두 번째 카메라가 생기면 share 줄을 지우고 \"device\": 장치번호 로 바꾸면 독립 캡처가 됨."
+    }
+  ],
+
+  "overlap": {
+    "mode": "unknown",
+    "_설명": "서로 다른 카메라 두 대를 쓸 때만 의미 있음 (CAM-02 가 복제 화면이면 중복이 생기지 않음). unknown = 겹침 여부를 모름 → 전체 인원을 '최소~최대(추정)'로 표시 / none = 두 카메라 촬영 영역이 겹치지 않음을 확인함 → 합계 / regions = 각 카메라 화면에서 서로 겹치는 영역을 다각형(0~1 비율 좌표)으로 지정 → 예: \"regions\": {\"CAM-01\": [[0.6,0],[1,0],[1,1],[0.6,1]], \"CAM-02\": [[0,0],[0.4,0],[0.4,1],[0,1]]}"
+  },
+
+  "models": {
+    "people": { "path": "models/사람수", "min_confidence": 0.6 },
+    "danger": { "path": "models/위험도", "positive_label": "위험", "min_confidence": 0.7 },
+    "fall":   { "path": "models/낙상",   "positive_label": "낙상", "min_confidence": 0.75 }
+  },
+
+  "person_detector": {
+    "enabled": true,
+    "mode": "background",
+    "interval_sec": 0.25,
+    "_설명": "mode: background = 빈 배경과 비교해 레고 피규어를 찾음(레고 시연용) / yolo = 사전 학습 YOLO 의 사람(person) 탐지. interval_sec 0.25 = 초당 4회",
+    "background": {
+      "diff_threshold": 32,
+      "min_area": 0.0005,
+      "max_area": 0.2,
+      "merge_px": 9,
+      "hold_sec": 0.8,
+      "min_hits": 2,
+      "learn_rate": 0.002,
+      "max_foreground": 0.35,
+      "_설명": "diff_threshold 를 낮추면 더 민감(그림자도 잡힘), 높이면 둔감. min_area 는 화면 대비 최소 크기(작은 레고가 안 잡히면 낮춤). merge_px 는 머리·몸 조각을 합치는 거리"
+    },
+    "yolo": {
+      "weights": "models/yolo/yolo11n.pt",
+      "confidence": 0.35,
+      "imgsz": 640,
+      "device": "cpu",
+      "tracker": "bytetrack.yaml",
+      "hold_sec": 0.6
+    }
+  },
+
+  "analysis": {
+    "interval_sec": 0.3,
+    "window": 8,
+    "min_agreement": 0.6
+  }
+}
