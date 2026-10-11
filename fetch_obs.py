@@ -1,10 +1,20 @@
 """기상청 API허브 AWS 매분자료에서 부산 관측소 값을 받아 obs.json으로 저장한다."""
-import json, os, sys, urllib.request
+import json, os, sys, time, urllib.request
 from datetime import datetime, timedelta, timezone
 
 STATIONS = {"937": "해운대", "942": "부산남구", "904": "사하", "921": "가덕도", "910": "영도", "159": "부산"}
 KST = timezone(timedelta(hours=9))
 key = os.environ["KMA_KEY"]
+
+def get(url):
+    """기상청 서버가 해외(GitHub)에서 접속이 자주 끊겨 몇 번 다시 시도한다."""
+    for attempt in range(4):
+        try:
+            return urllib.request.urlopen(url, timeout=40).read()
+        except OSError:
+            if attempt == 3:
+                raise
+            time.sleep(5)
 
 def val(text):
     v = float(text)
@@ -18,7 +28,7 @@ def waves():
     url = f"https://apihub.kma.go.kr/api/typ01/url/sea_obs.php?tm={tm}&stn=0&help=0&authKey={key}"
     out = {}
     try:
-        raw = urllib.request.urlopen(url, timeout=25).read().decode("euc-kr", "ignore")
+        raw = get(url).decode("euc-kr", "ignore")
     except OSError as e:
         print("파고 요청 실패:", type(e).__name__)
         return out
@@ -36,7 +46,7 @@ for step in range(3):  # 최신 자료가 아직 없으면 10분씩 앞 시각�
     tm = (base - timedelta(minutes=10 * step)).strftime("%Y%m%d%H%M")
     url = f"https://apihub.kma.go.kr/api/typ01/cgi-bin/url/nph-aws2_min?tm2={tm}&stn=0&disp=1&help=0&authKey={key}"
     try:
-        raw = urllib.request.urlopen(url, timeout=25).read().decode("euc-kr", "ignore")
+        raw = get(url).decode("euc-kr", "ignore")
     except OSError as e:
         print(tm, "요청 실패:", type(e).__name__)
         continue
