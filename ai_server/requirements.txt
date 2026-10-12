@@ -6,3 +6,5 @@ flask==3.0.3
 # 사람 객체 탐지·추적 (YOLO + ByteTrack). PyTorch 가 함께 설치됨
 ultralytics==8.3.40
 lap>=0.5.12
+# 아두이노 온습도 센서 자동 읽기 (page_server.py)
+pyserial==3.5

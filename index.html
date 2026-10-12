@@ -1730,10 +1730,12 @@
               <article class="metric-card">
                 <div class="metric-heading"><span>기온</span><span class="metric-icon">🌡️</span></div>
                 <div class="metric-value"><span id="tempValue">-</span> <small>℃</small></div>
+                <div class="metric-footer"><span id="tempSrc"></span></div>
               </article>
               <article class="metric-card">
                 <div class="metric-heading"><span>습도</span><span class="metric-icon">💧</span></div>
                 <div class="metric-value"><span id="humValue">-</span> <small>%</small></div>
+                <div class="metric-footer"><span id="humSrc"></span><button class="mini-button" id="sensorButton" type="button">🔌 아두이노 연결</button></div>
               </article>
             </div>
 
@@ -1795,7 +1797,6 @@
   </div>
 
   <div class="toast" id="toast" role="status"></div>
-  <div id="aiFeeds" hidden></div>
 
   <script>
     /* ------------------------------------------------------------------
@@ -1831,21 +1832,23 @@
       { title: "추락 경고", text: "경고 방송입니다. 높은 파도와 강한 바람으로 추락 위험이 매우 높습니다. 테트라포드 위에 계신 분은 즉시 내려와 육지 쪽으로 대피하십시오." },
       { title: "출동 예고", text: "경찰에서 알려드립니다. 잠시 후 경찰관이 현장에 도착합니다. 방파제에 계신 분들은 경찰관의 안내에 따라 주시기 바랍니다." },
       { title: "위험 구역 안내 (AI)", text: "안전 안내 방송입니다. 현재 방파제 주변에 위험 상황이 감지되었습니다. 방파제 끝쪽에서 멀리 떨어지고 안전한 구역으로 이동해 주시기 바랍니다." },
-      { title: "낙상 의심 긴급 안내 (AI)", text: "긴급 안전 안내입니다. 방파제에서 낙상 의심 상황이 감지되었습니다. 주변 접근을 삼가고 안전을 확보해 주시기 바랍니다." }
+      { title: "추락 의심 긴급 안내 (AI)", text: "긴급 안전 안내입니다. 방파제에서 추락 의심 상황이 감지되었습니다. 주변 접근을 삼가고 안전을 확보해 주시기 바랍니다." }
     ];
+    const CAST_WARN = 1;   // '추락 경고' — 안내 방송 기본 문안
     const CAST_DANGER = 3;
     const CAST_FALL = 4;
 
     // AI 영상 분석 경보 문구
-    const MSG_FALL = "[긴급] 방파제에서 낙상 의심 상황이 감지되었습니다. 즉시 CCTV 영상을 확인하고 현장 출동 여부를 판단해 주세요.";
-    const MSG_DISPATCH = "[현장 출동 요청] 방파제 낙상 의심 상황이 발생했습니다. 담당자는 현장을 확인하고 필요한 안전 조치를 진행해 주세요.";
+    const MSG_FALL = "[긴급] 방파제에서 추락 의심 상황이 감지되었습니다. 즉시 CCTV 영상을 확인하고 현장 출동 여부를 판단해 주세요.";
+    const MSG_DISPATCH = "[현장 출동 요청] 방파제 추락 의심 상황이 발생했습니다. 담당자는 현장을 확인하고 필요한 안전 조치를 진행해 주세요.";
 
     const AI_POLL_MS = 500;      // AI 서버 결과 조회 간격
     const PERSON_POLL_MS = 150;  // 사람 탐지 박스 조회 간격 (박스가 사람을 따라 움직이도록 더 자주)
     const PERSON_STALE_MS = 1500; // 이보다 오래된 박스는 그리지 않음
     const AI_LOST_MS = 3000;     // 이 시간 동안 응답이 없으면 'AI 연결 끊김'
-    const AI_CONFIRM_MS = 2000;  // 위험·낙상 판단이 이만큼 유지돼야 경보 발생 (한 프레임 오판으로 경보 금지)
-    const AI_CLEAR_MS = 8000;    // 안위험·안낙상이 이만큼 유지되면 해제(위험 구역) 또는 해제 대기(낙상)
+    const AI_CONFIRM_MS = 2000;
+    const AI_FALL_CONFIRM_MS = 5000; // 추락은 더 엄격하게: 5초 이상 '추락'(97% 이상)이 유지돼야 긴급 경보  // 위험·추락 판단이 이만큼 유지돼야 경보 발생 (한 프레임 오판으로 경보 금지)
+    const AI_CLEAR_MS = 8000;    // 안위험·추락 미감지이 이만큼 유지되면 해제(위험 구역) 또는 해제 대기(추락)
     const CAST_REPEAT_MS = 20000; // 같은 방송 문구 반복 송출 방지
 
     const MIN_SCORE = 0.5;          // 사람 인식 최소 신뢰도
@@ -1910,6 +1913,10 @@
     }
 
     const anyLive = (site) => site.lives.some(Boolean);
+    // AI 분석이 붙은 카메라: AI 서버(kind "ai") 또는 브라우저 분석(kind "local")
+    const isAnalyzed = (l) => !!l && (l.kind === "ai" || l.kind === "local");
+    // 브라우저 분석은 서버 연결과 상관없이 항상 사용 가능
+    const online = (l) => (l && l.kind === "local") || ai.ok;
     const streamKey = (site, k) => `${site.name}#${k}`;
 
     /* ---------------- 방파제 좌표 ---------------- */
@@ -1988,7 +1995,7 @@
     // AI 사람 수 모델은 장면 전체를 분류할 뿐 위치를 주지 않으므로 t 가 없는 인원은 '위치 미상'으로 표시
     const camName = (site, k) => cams(site)[k].id;
     const spot = (site, p) => p.t == null
-      ? `${camName(site, p.cam)} 화면 내 · 위치 미상 (AI 인원 분류)`
+      ? `${camName(site, p.cam)} 화면 내 · 위치 미상 (인원)`
       : where(site, p.t).text + (p.tetra ? " · 테트라포드 위" : "");
 
     function sortedPeople(site) {
@@ -2018,7 +2025,7 @@
     const footOf = (b) => [b.box[0] + b.box[2] / 2, b.box[1] + b.box[3]];
 
     function headcount(s) {
-      const views = s.lives.filter((l) => l && l.kind === "ai" && !l.dup && personsOk(l));
+      const views = s.lives.filter((l) => isAnalyzed(l) && !l.dup && personsOk(l));
       const n = s.people.length;
       if (views.length < 2) return { min: n, max: n, exact: true };
       const counts = views.map((l) => l.persons.count);
@@ -2078,7 +2085,7 @@
     }
 
     function downloadCsv() {
-      const rows = [["일시", "구역", "카메라", "구분", "경보 유형", "감지 인원(사람 탐지)", "TM 인원 분류(비교용)", "위험도 모델", "낙상 모델", "내용"], ...logs.map((l) =>
+      const rows = [["일시", "구역", "카메라", "구분", "경보 유형", "감지 인원(사람 탐지)", "TM 인원 분류(비교용)", "위험도 모델", "추락 모델", "내용"], ...logs.map((l) =>
         [new Date(l.ts).toLocaleString("ko-KR", { hour12: false }), l.site, l.cam || "", LOG_NAMES[l.type] || l.type,
           l.alarm || "", l.people ?? "", l.tmPeople || "", l.danger || "", l.fall || "", l.msg])];
       const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\r\n");
@@ -2172,22 +2179,39 @@
         return r.json();
       }).then((j) => [].concat(j));
 
+      // 마지막으로 받은 값을 저장해 두고 10분 안에는 다시 요청하지 않음 (새로고침해도 API 한도를 쓰지 않게)
+      const key = `${lat}|${lon}`;
+      const cache = store("bw.wx");
+      const cacheOk = (maxAge) => cache && cache.key === key && Date.now() - cache.at < maxAge;
+      let landV, seaV, from = "net";
+      if (cacheOk(WEATHER_INTERVAL)) {
+        [landV, seaV, from] = [cache.land, cache.sea, "cache"];
+      } else {
       const [land, sea] = await Promise.allSettled([
         get(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=precipitation,wind_speed_10m,wind_gusts_10m,temperature_2m,relative_humidity_2m&hourly=precipitation,wind_speed_10m,wind_gusts_10m&forecast_hours=24&wind_speed_unit=ms&timezone=Asia%2FSeoul`),
         get(`https://marine-api.open-meteo.com/v1/marine?latitude=${lat}&longitude=${lon}&current=wave_height&hourly=wave_height&forecast_hours=24&timezone=Asia%2FSeoul`)
       ]);
 
-      if (land.status !== "fulfilled" || land.value.length !== sites.length) {
+      if (land.status === "fulfilled" && land.value.length === sites.length) {
+        landV = land.value;
+        seaV = sea.status === "fulfilled" ? sea.value : null;
+        store("bw.wx", { key, at: Date.now(), land: landV, sea: seaV });
+      } else if (cacheOk(6 * 3600e3)) {
+        // 수신 실패(하루 요청 한도 초과 등) → 가짜 값으로 바꾸지 않고 마지막 실제 값을 시각과 함께 유지
+        [landV, seaV, from] = [cache.land, cache.sea, "stale"];
+        if (weather.error.indexOf("값 유지") < 0) addLog(null, "sys", `기상 데이터 수신 실패 — ${fmtTime(cache.at).slice(0, 5)}에 받은 실제 값 유지`);
+      } else {
         if (weather.mode !== "sim") addLog(null, "sys", "기상 데이터 수신 실패 — 시뮬레이션 값으로 전환");
         weather = { mode: "sim", at: Date.now(), error: "수신 실패" };
         sites.forEach((s) => { s.fc = null; });
         return;
       }
+      }
 
       const first = weather.mode !== "live";
       sites.forEach((s, i) => {
-        const c = land.value[i].current;
-        const w = sea.status === "fulfilled" && sea.value[i] ? sea.value[i].current.wave_height : null;
+        const c = landV[i].current;
+        const w = seaV && seaV[i] ? seaV[i].current.wave_height : null;
         s.obs = {
           wind: c.wind_speed_10m,
           gust: c.wind_gusts_10m,
@@ -2198,14 +2222,15 @@
         };
         if (first && !s.demo) s.r = { ...s.obs };
 
-        const h = land.value[i].hourly;
-        const mh = sea.status === "fulfilled" && sea.value[i] ? sea.value[i].hourly : null;
+        const h = landV[i].hourly;
+        const mh = seaV && seaV[i] ? seaV[i].hourly : null;
         s.fc = h ? h.time.map((time, k) => {
           const r = { wind: h.wind_speed_10m[k], gust: h.wind_gusts_10m[k], rain: h.precipitation[k], wave: mh ? mh.wave_height[k] : null };
           return { ...r, ts: new Date(time).getTime(), hour: Number(time.slice(11, 13)), risk: calcRisk(r) };
         }) : null;
       });
-      weather = { mode: "live", at: Date.now(), error: sea.status === "fulfilled" ? "" : "파고 미수신" };
+      weather = { mode: "live", at: from === "net" ? Date.now() : cache.at,
+        error: from === "stale" ? `수신 실패 · ${fmtTime(cache.at).slice(0, 5)} 값 유지` : seaV ? "" : "파고 미수신" };
 
       // 기상청 AWS 실제 관측값(풍속·강수)이 있으면 모델 값 대신 사용. 파고는 모델 값 유지.
       try {
@@ -2291,10 +2316,10 @@
     /* ---------------- 경보 판단 ---------------- */
     let incSeq = 0;
 
-    // 진행 중인 경보 중 화면에 우선 보여 줄 것: AI 낙상 의심 > AI 위험 구역 > 기상 경보
+    // 진행 중인 경보 중 화면에 우선 보여 줄 것: AI 추락 의심 > AI 위험 구역 > 기상 경보
     const curInc = (s) => s.aiInc || s.inc;
     const incidents = (s) => [s.aiInc, s.inc].filter(Boolean);
-    const incName = (inc) => (inc.kind === "fall" ? "긴급 · 낙상 의심" : inc.kind === "danger" ? "AI 위험 구역" : "기상 경보");
+    const incName = (inc) => (inc.kind === "fall" ? "긴급 · 추락 의심" : inc.kind === "danger" ? "AI 위험 구역" : "기상 경보");
 
     function evaluate() {
       const now = Date.now();
@@ -2350,7 +2375,7 @@
         }
       }
 
-      // 인원이 감지됐는데 아직 조치가 없거나, 낙상 의심을 담당자가 아직 확인하지 않았으면 경보음 반복
+      // 인원이 감지됐는데 아직 조치가 없거나, 추락 의심을 담당자가 아직 확인하지 않았으면 경보음 반복
       const pending = sites.some((s) => incidents(s).some((inc) =>
         (inc.kind === "fall" && !inc.ackAt && !inc.dispAt && !inc.pendingClear) ||
         (inc.detAt && !inc.castAt && !inc.dispAt && s.people.length)));
@@ -2359,31 +2384,37 @@
 
     /* ---------------- AI 영상 분석 경보 ----------------
        - 서버가 이미 최근 8회 추론을 다수결로 안정화한 결과(state 'ok')만 판단에 씀. 'pending'(판별 중)·'uncertain'(확인 필요)은 위험으로 단정하지 않음.
-       - 위험·낙상이 AI_CONFIRM_MS 동안 유지돼야 경보를 만들고, 진행 중인 경보는 다시 만들지 않음.
-       - 안위험·안낙상이 AI_CLEAR_MS 동안 유지되면 위험 구역 경보는 자동 해제, 낙상 의심은 '해제 대기'(담당자가 상황 종료). */
+       - 위험·추락이 AI_CONFIRM_MS 동안 유지돼야 경보를 만들고, 진행 중인 경보는 다시 만들지 않음.
+       - 안위험·추락 미감지이 AI_CLEAR_MS 동안 유지되면 위험 구역 경보는 자동 해제, 추락 의심은 '해제 대기'(담당자가 상황 종료). */
     function aiFindings(s) {
-      const views = s.lives.filter((l) => l && l.kind === "ai");
+      const views = s.lives.filter(isAnalyzed);
       if (!views.length) return null;
-      const src = views.filter((l) => !l.dup && l.srv && l.srv.analysis);
-      if (!ai.ok || !src.length) return { online: false };
+      const src = views.filter((l) => !l.dup && online(l) && l.srv && l.srv.analysis);
+      if (!src.length) return { online: false };
       const r = (l, key) => l.srv.analysis[key];
-      const hit = (key) => src.find((l) => r(l, key) && r(l, key).state === "ok" && r(l, key).positive);
+      // 레고 탐지가 동작 중인데 레고가 0개면 추락일 수 없으므로 추락 모델 판단을 무시 (레고 없는 장면의 오경보 방지)
+      const noLego = (l) => personsOk(l) && l.persons.count === 0;
+      const pos = (l, key) => r(l, key) && r(l, key).state === "ok" && r(l, key).positive && !(key === "fall" && noLego(l));
+      const hit = (key) => src.find((l) => pos(l, key));
       const zone = src.find((l) => zonePeople(s, l).length);
-      const normal = !zone && src.every((l) => ["fall", "danger"].every((key) => r(l, key) && r(l, key).state === "ok" && r(l, key).positive === false));
+      // 해제 조건: 어느 카메라에서도 추락·위험이 아니고, 한 대 이상이 확실히 정상 (판별 중·불확실한 카메라는 해제를 막지 않음)
+      const sure = (l) => ["fall", "danger"].every((key) => r(l, key) && r(l, key).state === "ok");
+      const normal = !zone && !src.some((l) => pos(l, "fall") || pos(l, "danger")) && src.some(sure);
       return { online: true, fall: hit("fall"), danger: hit("danger") || zone, zone, normal };
     }
 
-    const fmtAI = (r) => (!r ? "분석 없음" : r.state === "ok" ? `${r.label} (${Math.round(r.confidence * 100)}%)`
-      : r.state === "pending" ? "판별 중" : r.state === "uncertain" ? `확인 필요 (${r.candidate}?)` : "모델 오류");
+    const fmtAI = (r) => (!r ? "분석 없음" : r.state === "ok" ? `${r.label} ${Math.round(r.confidence * 100)}%`
+      : r.state === "no_signal" ? "영상 없음 · 판정 안 함"
+      : r.state === "pending" ? "판별 중" : r.state === "uncertain" ? `확인 필요 (${r.candidate} ${Math.round(r.confidence * 100)}%)` : "모델 오류");
 
     // 상황 기록에 붙일 AI 결과 (카메라 번호·인원·모델 결과)
     function aiExtra(s, k) {
-      const l = (k != null && s.lives[k] && s.lives[k].kind === "ai" ? s.lives[k] : null) || s.lives.find((x) => x && x.kind === "ai" && !x.dup);
+      const l = (k != null && isAnalyzed(s.lives[k]) ? s.lives[k] : null) || s.lives.find((x) => isAnalyzed(x) && !x.dup);
       if (!l) return {};
       const a = l.srv && l.srv.analysis;
-      if (!ai.ok || !a) return { cam: camName(s, l.k), people: "AI 연결 끊김", danger: "-", fall: "-" };
+      if (!online(l) || !a) return { cam: camName(s, l.k), people: online(l) ? "분석 준비 중" : "AI 연결 끊김", danger: "-", fall: "-" };
       // 감지 인원 = YOLO 사람 탐지 결과(기본), TM 사람수 분류는 비교용으로 따로 남김
-      const src = l.dup ? s.lives.find((x) => x && x.kind === "ai" && !x.dup) || l : l;
+      const src = srcLive(s, l);
       const det = personsOk(src) ? src.persons.count : personsBroken(src) ? (a.people.state === "ok" ? a.people.count : fmtAI(a.people)) : "판별 중";
       return { cam: camName(s, l.k), people: det, tmPeople: fmtAI(a.people), danger: fmtAI(a.danger), fall: fmtAI(a.fall) };
     }
@@ -2411,14 +2442,14 @@
       const armed = s.aiRearm !== false;
       const inc = s.aiInc;
 
-      if (held("fall") && (inc ? inc.kind !== "fall" : armed)) {
+      if (held("fall", AI_FALL_CONFIRM_MS) && (inc ? inc.kind !== "fall" : armed)) {
         const k = a.fall.k;
         const cam = camName(s, k);
         if (inc) Object.assign(inc, { kind: "fall", fallAt: now, cam: k, pendingClear: 0 });
         else s.aiInc = { id: ++incSeq, kind: "fall", at: now, fallAt: now, cam: k };
-        addLog(s, "urgent", `${inc ? "위험 구역 경보에서 격상 — " : ""}${MSG_FALL}`, { ...aiExtra(s, k), alarm: "긴급 · 낙상 의심" });
+        addLog(s, "urgent", `${inc ? "위험 구역 경보에서 격상 — " : ""}${MSG_FALL}`, { ...aiExtra(s, k), alarm: "긴급 · 추락 의심" });
         beep(3);
-        showToast(`🚨 ${s.name} ${cam} — 낙상 의심 감지`);
+        showToast(`🚨 ${s.name} ${cam} — 추락 의심 감지`);
         notifyOut("fall", s, MSG_FALL, { camera: cam });
         if (cfg.autoCast) doBroadcast(s, BROADCASTS[CAST_FALL].text, "browser", true);
         if ($("modal").hidden) askAck(s);
@@ -2438,11 +2469,11 @@
       if (!cur) return;
       if ((a.fall || a.danger) && cur.pendingClear) {
         cur.pendingClear = 0;
-        addLog(s, "alert", "AI가 다시 위험/낙상을 판단 — 해제 대기 취소", { ...aiExtra(s, cur.cam), alarm: incName(cur) });
+        addLog(s, "alert", "AI가 다시 위험/추락을 판단 — 해제 대기 취소", { ...aiExtra(s, cur.cam), alarm: incName(cur) });
       }
       if (held("normal", AI_CLEAR_MS)) {
         if (cur.kind === "danger" && !cur.dispAt) {
-          addLog(s, "clear", `AI 위험 구역 경보 자동 해제 — ${AI_CLEAR_MS / 1000}초간 위험 구역 진입 없음·안위험·안낙상 확인`, { ...aiExtra(s, cur.cam), alarm: "AI 위험 구역" });
+          addLog(s, "clear", `AI 위험 구역 경보 자동 해제 — ${AI_CLEAR_MS / 1000}초간 위험 구역 진입 없음·위험 아님·추락 아님 확인`, { ...aiExtra(s, cur.cam), alarm: "AI 위험 구역" });
           s.aiInc = null;
         } else if (!cur.pendingClear) {
           cur.pendingClear = now;
@@ -2503,30 +2534,30 @@
       const x = aiExtra(s, inc.cam);
       return `
         <table class="fact-table">
-          <tr><th>경보</th><td><b>${inc.kind === "fall" ? "긴급: 낙상 의심" : "AI 위험 구역"}</b></td></tr>
+          <tr><th>경보</th><td><b>${inc.kind === "fall" ? "긴급: 추락 의심" : "AI 위험 구역"}</b></td></tr>
           <tr><th>감지 카메라</th><td>${esc(camName(s, inc.cam))}</td></tr>
           <tr><th>감지 시간</th><td>${fmtTime(inc.fallAt || inc.at)}</td></tr>
-          <tr><th>현재 AI 판단</th><td>낙상 모델 ${esc(x.fall || "-")} · 위험도 모델 ${esc(x.danger || "-")} · 인원 ${esc(String(x.people ?? "-"))}</td></tr>
+          <tr><th>현재 AI 판단</th><td>추락 모델 ${esc(x.fall || "-")} · 위험도 모델 ${esc(x.danger || "-")} · 인원 ${esc(String(x.people ?? "-"))}</td></tr>
           <tr><th>담당자 확인</th><td>${inc.ackAt ? `확인 (${fmtTime(inc.ackAt)})` : "미확인"}</td></tr>
           <tr><th>출동 요청</th><td>${inc.dispAt ? `현장 출동 요청 접수 (${fmtTime(inc.dispAt)}) · 시연 상태` : "요청 전"}</td></tr>
         </table>`;
     }
 
-    // 낙상 의심 긴급 경보: 담당자 확인
+    // 추락 의심 긴급 경보: 담당자 확인
     function askAck(s = current) {
       const inc = s.aiInc;
       if (!inc || inc.kind !== "fall") return;
       openModal({
-        title: "🚨 긴급: 낙상 의심",
+        title: "🚨 긴급: 추락 의심",
         ok: inc.ackAt ? "확인함" : "담당자 확인",
         cancel: "닫기",
         danger: true,
         body: `<p><b>${esc(MSG_FALL)}</b></p>${aiTable(s)}
-          <p>AI 영상 분류에 따른 ‘낙상 의심’ 판단입니다. 실제 상황은 CCTV 영상으로 직접 확인하세요. 확인 후 오른쪽 ‘현장 출동’ 버튼으로 출동 요청을 진행할 수 있습니다.</p>`,
+          <p>AI 영상 분류에 따른 ‘추락 의심’ 판단입니다. 실제 상황은 CCTV 영상으로 직접 확인하세요. 확인 후 오른쪽 ‘현장 출동’ 버튼으로 출동 요청을 진행할 수 있습니다.</p>`,
         onOk() {
           if (!inc.ackAt) {
             inc.ackAt = Date.now();
-            addLog(s, "urgent", "낙상 의심 경보 담당자 확인", { ...aiExtra(s, inc.cam), alarm: "긴급 · 낙상 의심" });
+            addLog(s, "urgent", "추락 의심 경보 담당자 확인", { ...aiExtra(s, inc.cam), alarm: "긴급 · 추락 의심" });
           }
           closeModal();
         }
@@ -2535,7 +2566,8 @@
 
     function askBroadcast(s = current) {
       const inc = curInc(s);
-      const pick = inc && inc.kind === "fall" ? CAST_FALL : inc && inc.kind === "danger" ? CAST_DANGER : inc && inc.castAt ? 1 : 0;
+      // 기본 문안은 '추락 경고'. 추락 의심 긴급 경보가 진행 중일 때만 '추락 의심 긴급 안내'를 먼저 선택
+      const pick = inc && inc.kind === "fall" ? CAST_FALL : CAST_WARN;
       const tts = !!window.speechSynthesis;
       const mac = ai.ok && ai.status && ai.status.speech && ai.status.speech.available;
       openModal({
@@ -2618,7 +2650,7 @@
       const inc = curInc(s);
       const fall = inc && inc.kind === "fall";
       openModal({
-        title: fall ? "🚨 현장 출동 요청 — 긴급: 낙상 의심" : "🚨 현장 출동 지시",
+        title: fall ? "🚨 현장 출동 요청 — 긴급: 추락 의심" : "🚨 현장 출동 지시",
         ok: fall ? "출동 요청 접수" : "출동 지시",
         danger: true,
         body: `${fall ? `<p><b>${esc(MSG_DISPATCH)}</b></p>` : ""}${aiTable(s)}${factTable(s)}
@@ -2660,7 +2692,7 @@
             <textarea id="closeMemo" placeholder="예: 낚시객 2명 계도 후 귀가 조치"></textarea>
           </label>
           ${hot ? (inc.kind
-            ? `<p>AI가 아직 위험 또는 낙상 의심으로 판단하고 있습니다. 종료하면 정상 상태가 ${AI_CLEAR_MS / 1000}초간 확인된 뒤에만 새 AI 경보가 발생합니다.</p>`
+            ? `<p>AI가 아직 위험 또는 추락 의심으로 판단하고 있습니다. 종료하면 정상 상태가 ${AI_CLEAR_MS / 1000}초간 확인된 뒤에만 새 AI 경보가 발생합니다.</p>`
             : `<p>위험도가 아직 경보 기준 이상입니다. 종료하면 이 구역의 경보는 10분간 보류되고, 이후에도 기준 이상이면 다시 발령됩니다.</p>`) : ""}`,
         onOk() {
           const memo = $("closeMemo").value.trim();
@@ -2694,6 +2726,9 @@
           </label>
           <label class="check"><input id="soundInput" type="checkbox" ${cfg.sound ? "checked" : ""} /> 경보음 사용</label>
           <label class="check"><input id="desktopInput" type="checkbox" ${cfg.desktop ? "checked" : ""} /> 데스크톱 알림 (다른 창을 보고 있어도 알림 표시)</label>
+          <label>아두이노 온습도 센서 보드레이트 (Serial.begin 값과 같게, 다음 연결부터 적용)
+            <select id="baudInput">${[9600, 19200, 38400, 57600, 115200].map((b) => `<option value="${b}" ${Number(cfg.sensorBaud || 9600) === b ? "selected" : ""}>${b}</option>`).join("")}</select>
+          </label>
           <label class="check"><input id="cocoInput" type="checkbox" ${cfg.cocoPerson ? "checked" : ""} /> 브라우저 카메라에서 실제 사람 인식(COCO-SSD) 사용 — 레고에는 부정확·무거움, 기본 꺼짐 (다음 카메라 연결부터 적용)</label>
           <label>외부 연동 주소 (Webhook) — 경보·감지·방송·출동 때 JSON을 POST로 전송
             <input id="hookInput" type="url" placeholder="https://..." value="${esc(cfg.webhook)}" />
@@ -2745,6 +2780,10 @@
         if (!cfg.webhook) return showToast("주소를 먼저 입력하세요.");
         notifyOut("test", current, "연동 테스트 메시지");
         showToast("테스트 메시지를 보냈습니다. 받는 쪽에서 확인하세요.");
+      });
+      $("baudInput").addEventListener("change", (e) => {
+        cfg.sensorBaud = Number(e.target.value);
+        store("bw.cfg", cfg);
       });
       $("cocoInput").addEventListener("change", (e) => {
         cfg.cocoPerson = e.target.checked;
@@ -2800,6 +2839,460 @@
       store("bw.cfg", cfg);
       $("soundButton").textContent = on ? "🔔" : "🔕";
       $("soundButton").title = on ? "경보음 켜짐" : "경보음 꺼짐";
+    }
+
+    /* ---------------- 브라우저 안에서 하는 AI 분석 (AI 서버 없이) ----------------
+       '📷 카메라 연결'·'🎞 영상 파일'·'🌐 스트림 주소'로 연결한 영상을 브라우저가 직접 분석한다.
+       - 티처블 머신 모델 3개(사람수·위험도·추락)를 브라우저용으로 변환한 web_models/ 를 TensorFlow.js 로 한 번만 불러와 재사용
+       - 레고 피규어 개별 탐지: 빈 배경과 비교 (ai_server/lego_detector.py 와 같은 방식)
+       - 분류는 초당 약 3회, 레고 탐지는 초당 약 4회 (화면 그리기와 별도) */
+    const LOCAL_MODELS = [
+      { key: "people", dir: "web_models/사람수", minConf: 0.6 },
+      { key: "danger", dir: "web_models/위험도", minConf: 0.7, positive: "위험" },
+      { key: "fall", dir: "web_models/낙상", minConf: 0.97, positive: "추락" } // 추락은 신뢰도 97% 이상만 확정 (오경보 줄이기)
+    ];
+    const LOCAL_TM_MS = 330;
+    const LOCAL_LEGO_MS = 250;
+    const TM = { models: null, loading: null, error: "" };
+
+    function loadTM() {
+      TM.loading = TM.loading || (async () => {
+        if (location.protocol === "file:") throw new Error("파일로 직접 열면 모델을 읽을 수 없습니다 — Live Server 또는 http://127.0.0.1:5050 으로 여세요");
+        if (!window.tf) await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
+        const out = {};
+        for (const d of LOCAL_MODELS) {
+          const [model, text] = await Promise.all([
+            tf.loadLayersModel(encodeURI(`${d.dir}/model.json`)),
+            fetch(encodeURI(`${d.dir}/labels.txt`)).then((r) => { if (!r.ok) throw new Error(`${d.dir}/labels.txt 없음`); return r.text(); })
+          ]);
+          const labels = text.trim().split(/\r?\n/).map((l) => l.trim().replace(/^\d+\s+/, ""));
+          if (model.outputs[0].shape[1] !== labels.length) throw new Error(`${d.dir}: 출력 ${model.outputs[0].shape[1]}개와 라벨 ${labels.length}개가 다름`);
+          tf.tidy(() => model.predict(tf.zeros([1, 224, 224, 3]))); // 첫 추론 지연 미리 처리
+          out[d.key] = { ...d, model, labels };
+        }
+        TM.models = out;
+        return out;
+      })();
+      TM.loading.catch((e) => { TM.error = e.message || String(e); });
+      return TM.loading;
+    }
+
+    // 티처블 머신 전처리: 가운데 정사각형 자르기 → 224×224 → 픽셀/127.5 - 1
+    function tmPredictAll(source) {
+      const w = source.videoWidth, h = source.videoHeight;
+      const s = Math.min(w, h);
+      const box = [[(h - s) / 2 / h, (w - s) / 2 / w, (h + s) / 2 / h, (w + s) / 2 / w]];
+      return tf.tidy(() => {
+        const img = tf.browser.fromPixels(source).toFloat().expandDims(0);
+        const x = tf.image.cropAndResize(img, box, [0], [224, 224]).div(127.5).sub(1);
+        const res = {};
+        for (const [key, m] of Object.entries(TM.models)) res[key] = Array.from(m.model.predict(x).dataSync());
+        return res;
+      });
+    }
+
+    // 최근 8번 중 60% 이상 같은 결과 + 평균 신뢰도 기준 이상일 때만 확정 (ai_server/models.py Smoother 와 같음)
+    class Smoother {
+      constructor(minConf) { this.hist = []; this.minConf = minConf; }
+      push(label, conf) { this.hist.push([label, conf]); if (this.hist.length > 8) this.hist.shift(); }
+      clear() { this.hist = []; }
+      result() {
+        if (this.hist.length < 3) return { state: "pending", label: null, confidence: null };
+        const votes = {};
+        for (const [l] of this.hist) votes[l] = (votes[l] || 0) + 1;
+        const [label, n] = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+        const confs = this.hist.filter(([l]) => l === label).map(([, c]) => c);
+        const conf = confs.reduce((a, b) => a + b, 0) / confs.length;
+        const ok = n / this.hist.length >= 0.6 && conf >= this.minConf;
+        return { state: ok ? "ok" : "uncertain", label: ok ? label : null, candidate: label, confidence: Math.round(conf * 1000) / 1000, agreement: n / this.hist.length };
+      }
+    }
+
+    // 프레임 사이에 박스를 이어 붙여 같은 레고에 같은 번호 (ai_server/lego_detector.py SimpleTracker 와 같음)
+    class LegoTracker {
+      constructor() { this.tracks = new Map(); this.nextId = 1; }
+      reset() { this.tracks.clear(); }
+      update(boxes, now) {
+        const iou = (a, b) => {
+          const iw = Math.max(0, Math.min(a[0] + a[2], b[0] + b[2]) - Math.max(a[0], b[0]));
+          const ih = Math.max(0, Math.min(a[1] + a[3], b[1] + b[3]) - Math.max(a[1], b[1]));
+          const inter = iw * ih, uni = a[2] * a[3] + b[2] * b[3] - inter;
+          return uni > 0 ? inter / uni : 0;
+        };
+        const ctr = (b) => [b[0] + b[2] / 2, b[1] + b[3] / 2];
+        const pairs = [];
+        for (const [id, t] of this.tracks) boxes.forEach((b, j) => {
+          const [tx, ty] = ctr(t.box), [bx, by] = ctr(b);
+          const dist = Math.hypot(tx - bx, ty - by), sc = iou(t.box, b);
+          if (sc > 0.1 || dist < 0.15) pairs.push([-sc, dist, id, j]);
+        });
+        pairs.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        const usedT = new Set(), usedB = new Set();
+        for (const [, , id, j] of pairs) {
+          if (usedT.has(id) || usedB.has(j)) continue;
+          usedT.add(id); usedB.add(j);
+          const t = this.tracks.get(id);
+          t.box = boxes[j].map((v, i) => 0.6 * v + 0.4 * t.box[i]);
+          t.seen = now; t.hits++;
+        }
+        boxes.forEach((b, j) => { if (!usedB.has(j)) this.tracks.set(this.nextId++, { no: 0, box: b, seen: now, hits: 1 }); });
+        for (const [id, t] of this.tracks) if (now - t.seen > 800) this.tracks.delete(id);
+        const used = new Set([...this.tracks.values()].map((t) => t.no).filter(Boolean));
+        for (const t of this.tracks.values()) {
+          if (!t.no && t.hits >= 3) { let n = 1; while (used.has(n)) n++; t.no = n; used.add(n); }
+        }
+        return [...this.tracks.values()].filter((t) => t.no).sort((a, b) => a.no - b.no)
+          .map((t) => ({ id: t.no, label: `PERSON ${t.no}`, box: t.box.map((v) => Math.round(v * 1e4) / 1e4), conf: null }));
+      }
+    }
+
+    // 레고 피규어 탐지 (ai_server/lego_detector.py 와 같은 방식, 작업 폭 320px)
+    // 1단계: 노란 머리 색으로 레고 확인 → 방파제·테트라포드·책상은 PERSON 이 되지 않음
+    // 2단계(빈 배경이 있을 때만): 밝기 보정 + 색 비율 비교(그림자 무시)로 원래 있던 노란 물체 제외, 몸까지 박스 확장
+    // 레고 노랑은 채도가 매우 높음(약 175~215). 사람 피부(약 60~140)·나무 책상(약 150 미만, 색상 16 이하)은 이 기준에서 빠짐.
+    const LEGO = { hLo: 18, hHi: 34, sMin: 150, vMin: 80, headMin: 0.00012, headMax: 0.01, chroma: 0.06, maxFg: 0.25, maxFig: 12 };
+
+    class LocalLego {
+      constructor(key) {
+        this.key = key; this.W = 320; this.bg = null; this.tracker = new LegoTracker();
+        this.cv = document.createElement("canvas");
+        this.ctx = this.cv.getContext("2d", { willReadFrequently: true });
+        const saved = store("bw.bg." + key);
+        if (saved) {
+          const img = new Image();
+          img.onload = () => { this.cv.width = img.width; this.cv.height = img.height; this.ctx.drawImage(img, 0, 0); this.bg = this.ctx.getImageData(0, 0, img.width, img.height); };
+          img.src = saved;
+        }
+      }
+      grab(video) {
+        const w = this.W, h = Math.round(video.videoHeight * w / video.videoWidth);
+        if (this.cv.width !== w || this.cv.height !== h) { this.cv.width = w; this.cv.height = h; }
+        this.ctx.drawImage(video, 0, 0, w, h);
+        return this.ctx.getImageData(0, 0, w, h);
+      }
+      setBackground(video) {
+        this.bg = this.grab(video);
+        this.tracker.reset();
+        try { store("bw.bg." + this.key, this.cv.toDataURL("image/png")); } catch (e) { /* 저장 공간 부족이어도 이번 실행에는 사용 */ }
+      }
+      // 빈 배경과 비교한 '새로 생긴 물체' (밝기 보정 + 색 비율 비교)
+      foreground(cur) {
+        const d = cur.data, b = this.bg.data, n = cur.width * cur.height;
+        const med = (arr, c) => { const hist = new Uint32Array(256); for (let i = 0; i < n; i++) hist[arr[i * 4 + c]]++; let s = 0; for (let v = 0; v < 256; v++) { s += hist[v]; if (s >= n / 2) return v + 1; } return 128; };
+        const gain = [0, 1, 2].map((c) => med(d, c) / med(b, c));
+        const m = new Uint8Array(n); let cnt = 0;
+        for (let i = 0; i < n; i++) {
+          const r = d[i * 4] + 1, g = d[i * 4 + 1] + 1, bl = d[i * 4 + 2] + 1;
+          const R = (b[i * 4] + 1) * gain[0], G = (b[i * 4 + 1] + 1) * gain[1], B = (b[i * 4 + 2] + 1) * gain[2];
+          const s1 = r + g + bl, s2 = R + G + B;
+          const chroma = Math.max(Math.abs(r / s1 - R / s2), Math.abs(g / s1 - G / s2), Math.abs(bl / s1 - B / s2));
+          if (chroma > LEGO.chroma || Math.abs(s1 - s2) / 3 > 70) { m[i] = 1; }
+        }
+        const out = LocalLego.morph(LocalLego.morph(m, cur.width, cur.height, 1, false), cur.width, cur.height, 1, true);
+        for (let i = 0; i < n; i++) cnt += out[i];
+        return [out, cnt / n];
+      }
+      update(video, now) {
+        const im = this.grab(video);
+        const w = im.width, h = im.height, n = w * h, d = im.data;
+        // 노란 머리 색 (OpenCV 와 같은 HSV 척도: H 0~180, S·V 0~255)
+        let ym = new Uint8Array(n);
+        for (let i = 0; i < n; i++) {
+          const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
+          const mx = Math.max(r, g, b), mn = Math.min(r, g, b), df = mx - mn;
+          if (mx < LEGO.vMin || !mx || (df * 255) / mx < LEGO.sMin || !df) continue;
+          let hh = mx === r ? ((g - b) / df) % 6 : mx === g ? (b - r) / df + 2 : (r - g) / df + 4;
+          hh = (hh * 30 + 180) % 180;
+          if (hh >= LEGO.hLo && hh <= LEGO.hHi) ym[i] = 1;
+        }
+        // 끊어진 노란 조각을 먼저 이어 붙임(연필 같은 얇은 물체가 짧은 조각으로 쪼개져 머리처럼 보이지 않게) → 잡음 제거
+        ym = LocalLego.morph(LocalLego.morph(ym, w, h, 1, true), w, h, 1, false);
+        ym = LocalLego.morph(LocalLego.morph(ym, w, h, 1, false), w, h, 1, true);
+        let fg = null;
+        if (this.bg && this.bg.width === w && this.bg.height === h) {
+          const [m, ratio] = this.foreground(im);
+          if (ratio > LEGO.maxFg) { this.tracker.reset(); return { state: "uncertain", boxes: [], error: `화면의 ${Math.round(ratio * 100)}%가 빈 배경과 다름 (카메라 이동·조명 변화) — 빈 배경을 다시 저장하세요` }; }
+          fg = m;
+        }
+        // 노란 머리 후보
+        const comps = LocalLego.components(ym, w, h);
+        let heads = comps.filter((c) => {
+          const frac = c.area / n, bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1;
+          // 레고 머리는 거의 동그란 원기둥 모양: 가로:세로 0.6~1.7, 꽉 찬 덩어리 (길쭉한 연필·막대는 제외)
+          if (frac < LEGO.headMin || frac > LEGO.headMax || bw / bh < 0.6 || bw / bh > 1.7 || c.area / (bw * bh) < 0.45 || bw < 3 || bh < 3) return false;
+          if (fg) { let s = 0; for (let y = c.y0; y <= c.y1; y++) for (let x = c.x0; x <= c.x1; x++) s += fg[y * w + x]; if (s / (bw * bh) < 0.3) return false; } // 원래 있던 노란 물체
+          return true;
+        }).sort((a, b) => b.area - a.area);
+        const figs = [];
+        for (const c of heads) {
+          const bw = c.x1 - c.x0 + 1, cx = (c.x0 + c.x1) / 2;
+          if (figs.some((f) => { const fw = f.x1 - f.x0 + 1, fh = f.y1 - f.y0 + 1; return Math.abs(cx - (f.x0 + f.x1) / 2) < 1.6 * fw && c.y0 >= f.y0 - 0.5 * fh && c.y0 <= f.y0 + 4 * fh; })) continue; // 손
+          figs.push(c);
+        }
+        if (figs.length > LEGO.maxFig) { this.tracker.reset(); return { state: "uncertain", boxes: [], error: `노란 덩어리가 ${figs.length}개로 너무 많음 — 조명·머리 색 확인 필요` }; }
+        let lab = null;
+        if (fg) {
+          const both = new Uint8Array(n); for (let i = 0; i < n; i++) both[i] = fg[i] | ym[i];
+          lab = LocalLego.components(LocalLego.morph(both, w, h, 1, true), w, h, true);
+        }
+        const boxes = figs.map((c) => {
+          let x0 = c.x0, y0 = c.y0, x1 = c.x1 + 1, y1 = c.y1 + 1;
+          if (lab) {
+            const bw = x1 - x0, bh = y1 - y0, ids = new Set();
+            for (let y = c.y0; y <= c.y1; y++) for (let x = c.x0; x <= c.x1; x++) if (lab.map[y * w + x]) ids.add(lab.map[y * w + x]);
+            const rx0 = Math.max(0, x0 - 4 * bw), rx1 = Math.min(w, x0 + 5 * bw), ry0 = Math.max(0, y0 - 2 * bh), ry1 = Math.min(h, y0 + 5 * bh);
+            for (let y = ry0; y < ry1; y++) for (let x = rx0; x < rx1; x++) if (ids.has(lab.map[y * w + x])) { x0 = Math.min(x0, x); x1 = Math.max(x1, x + 1); y0 = Math.min(y0, y); y1 = Math.max(y1, y + 1); }
+          }
+          return [x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h];
+        });
+        if (fg) { // 물체가 없는 곳의 배경만 아주 조금씩 갱신 (조명이 천천히 바뀌는 것 반영)
+          const near = LocalLego.morph(fg, w, h, 7, true), b = this.bg.data;
+          for (let i = 0; i < n; i++) if (!near[i]) for (let c = 0; c < 3; c++) b[i * 4 + c] += Math.round((d[i * 4 + c] - b[i * 4 + c]) * 0.01);
+        }
+        return { state: "ok", boxes: this.tracker.update(boxes, now), error: "" };
+      }
+      // 연결된 덩어리 찾기. withMap 이면 각 픽셀의 덩어리 번호도 돌려줌
+      static components(mask, w, h, withMap) {
+        const n = w * h, map = new Int32Array(n), out = [], stack = [];
+        let id = 0;
+        for (let i = 0; i < n; i++) {
+          if (!mask[i] || map[i]) continue;
+          id++;
+          const c = { x0: w, y0: h, x1: 0, y1: 0, area: 0 };
+          stack.push(i); map[i] = id;
+          while (stack.length) {
+            const p = stack.pop(), x = p % w, y = (p / w) | 0;
+            c.area++; if (x < c.x0) c.x0 = x; if (x > c.x1) c.x1 = x; if (y < c.y0) c.y0 = y; if (y > c.y1) c.y1 = y;
+            if (x > 0 && mask[p - 1] && !map[p - 1]) { map[p - 1] = id; stack.push(p - 1); }
+            if (x < w - 1 && mask[p + 1] && !map[p + 1]) { map[p + 1] = id; stack.push(p + 1); }
+            if (y > 0 && mask[p - w] && !map[p - w]) { map[p - w] = id; stack.push(p - w); }
+            if (y < h - 1 && mask[p + w] && !map[p + w]) { map[p + w] = id; stack.push(p + w); }
+          }
+          out.push(c);
+        }
+        return withMap ? { map, list: out } : out;
+      }
+      // 사각 커널 팽창(grow=true)/침식(grow=false), 반지름 r
+      static morph(m, w, h, r, grow) {
+        const tmp = new Uint8Array(m.length), out = new Uint8Array(m.length);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          let v = grow ? 0 : 1;
+          for (let k = -r; k <= r; k++) { const xx = x + k; const s = xx < 0 || xx >= w ? (grow ? 0 : 1) : m[y * w + xx]; if (grow ? s : !s) { v = grow ? 1 : 0; break; } }
+          tmp[y * w + x] = v;
+        }
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          let v = grow ? 0 : 1;
+          for (let k = -r; k <= r; k++) { const yy = y + k; const s = yy < 0 || yy >= h ? (grow ? 0 : 1) : tmp[yy * w + x]; if (grow ? s : !s) { v = grow ? 1 : 0; break; } }
+          out[y * w + x] = v;
+        }
+        return out;
+      }
+    }
+
+    // 브라우저 분석 루프 (카메라 하나당 하나, 연결이 바뀌면 자동 종료)
+    async function localLoop(site, k, live) {
+      const camId = camName(site, k);
+      live.lego = new LocalLego(`${site.name}#${k}`);
+      const sm = {};
+      for (const d of LOCAL_MODELS) sm[d.key] = new Smoother(d.minConf);
+      try {
+        await loadTM();
+      } catch (e) {
+        addLog(site, "sys", `${camId} 브라우저 AI 모델 로드 실패 — ${TM.error} (레고 탐지만 동작)`);
+        showToast(`AI 모델을 불러오지 못했습니다: ${TM.error}`);
+      }
+      let lastTM = 0;
+      const probe = document.createElement("canvas");
+      probe.width = 32; probe.height = 18;
+      const pctx = probe.getContext("2d", { willReadFrequently: true });
+      while (site.lives[k] === live) {
+        const t0 = performance.now();
+        const v = live.video;
+        if (v.readyState >= 2 && v.videoWidth && !v.paused) {
+          const now = Date.now();
+          // 검은 화면(카메라 가림·신호 없음)이면 위험도·추락·인원을 판정하지 않음
+          pctx.drawImage(v, 0, 0, 32, 18);
+          const px = pctx.getImageData(0, 0, 32, 18).data;
+          let sum = 0, max = 0;
+          for (let i = 0; i < px.length; i += 4) { const y = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]; sum += y; if (y > max) max = y; }
+          if (sum / (px.length / 4) < 12 && max < 40) {
+            for (const m of Object.values(sm)) m.clear();
+            const none = { state: "no_signal", label: null, confidence: null };
+            live.srv.analysis = { ts: now, dark: true, people: { ...none }, danger: { ...none }, fall: { ...none } };
+            live.persons = { state: "uncertain", mode: "background", error: "검은 화면 — 판정 안 함", count: null, boxes: [], at: now };
+            for (const l of site.lives) if (l && l.kind === "local") aiPeople(l);
+            syncPeople(site);
+            await new Promise((res) => setTimeout(res, LOCAL_LEGO_MS));
+            continue;
+          }
+          try {
+            const r = live.lego.update(v, now);
+            live.persons = { state: r.state, mode: "background", error: r.error, count: r.state === "ok" ? r.boxes.length : null, boxes: r.boxes, at: now };
+          } catch (e) {
+            live.persons = { state: "error", mode: "background", error: e.message, count: null, boxes: [], at: now };
+          }
+          if (TM.models && now - lastTM >= LOCAL_TM_MS) {
+            lastTM = now;
+            try {
+              const probs = tmPredictAll(v);
+              const a = { ts: now };
+              for (const [key, m] of Object.entries(TM.models)) {
+                const p = probs[key], i = p.indexOf(Math.max(...p));
+                sm[key].push(m.labels[i], p[i]);
+                const res = sm[key].result();
+                res.raw = { label: m.labels[i], confidence: Math.round(p[i] * 1000) / 1000 };
+                if (key === "people") { const mm = /(\d+)\s*명/.exec(res.label || ""); res.count = mm ? Number(mm[1]) : null; }
+                else res.positive = res.label ? res.label === m.positive : null;
+                a[key] = res;
+              }
+              live.srv.analysis = a;
+            } catch (e) {
+              live.srv.analysis = null;
+              if (!live.tmFailed) { live.tmFailed = true; addLog(site, "sys", `${camId} 브라우저 AI 분석 오류 — ${e.message}`); }
+            }
+          }
+          for (const l of site.lives) if (l && l.kind === "local") { if (l.dup) { l.persons = live.persons; l.srv.analysis = live.srv.analysis; } aiPeople(l); }
+          syncPeople(site);
+        }
+        await new Promise((res) => setTimeout(res, Math.max(30, LOCAL_LEGO_MS - (performance.now() - t0))));
+      }
+    }
+
+    function startLocal(site, k, live) {
+      const camId = camName(site, k);
+      Object.assign(live, { kind: "local", k, ready: true, people: [], persons: null, srv: { status: "live", device_name: live.label, analysis: null } });
+      // 카메라가 한 대뿐이면 CAM-02 에 같은 영상을 '복제 화면'으로 표시 (같은 장치를 두 번 열지 않음, 인원도 한 번만 셈)
+      // 연결한 화면에만 영상 표시. 다른 CCTV 는 직접 연결하기 전까지 '미연결' 유지 (자동 복제하지 않음)
+      rebuildTiles();
+      addLog(site, "sys", `${camId} ${live.label} 연결 — 브라우저 AI 분석 시작 (사람수·위험도·추락 모델 + 레고 탐지)`);
+      showToast(`${camId} 연결 — AI 모델을 불러오는 중입니다… (‘ 빈 배경 저장’ 후 표시)`);
+      localLoop(site, k, live);
+    }
+
+    /* ---------------- 아두이노 온습도 센서 (여러 대) ----------------
+       1순위: 화면 서버(부우산 시작.command → ai_server/page_server.py)가 USB 아두이노를 자동으로 찾아 읽은 값을 /api/sensors 로 받음
+              → 버튼을 누를 필요 없음
+       2순위(화면 서버가 없을 때): Chrome Web Serial — '🔌 아두이노 추가'로 한 대씩 연결 (처음 한 번은 브라우저 보안상 포트 선택 필요)
+       아두이노가 보내는 줄: "T=23.4,H=56.0", "습도:56% 온도:23도", "T:23.4 H:56", {"t":23.4,"h":56}, "23.4,56"
+       온도·습도가 모두 0 이면 센서를 못 읽는 것으로 보고 표시하지 않음. 10초 넘게 값이 없으면 '응답 없음'. */
+    const SENSOR_STALE_MS = 10000;
+    const sensorSrv = { available: null, list: [], lastTry: 0 }; // available: null=확인 전, true/false
+    const webSensors = [];                                         // Web Serial 로 연결한 아두이노들
+    let sensorConnecting = false;
+
+    function parseSensorLine(line) {
+      const out = {};
+      const t = /(?:^|[^a-z가-힣])(?:temperature|temp|t|온도|기온)\s*["=:]*\s*(-?\d+(?:\.\d+)?)/i.exec(line);
+      const h = /(?:^|[^a-z가-힣])(?:humidity|hum|h|습도)\s*["=:]*\s*(\d+(?:\.\d+)?)/i.exec(line);
+      if (t) out.t = Number(t[1]);
+      if (h) out.h = Number(h[1]);
+      if (!t && !h && !/[a-z가-힣]/i.test(line)) {
+        const nums = line.match(/-?\d+(?:\.\d+)?/g);
+        if (nums && nums.length === 2) { out.t = Number(nums[0]); out.h = Number(nums[1]); }
+      }
+      if (out.t != null && !(out.t > -40 && out.t < 85)) delete out.t;
+      if (out.h != null && !(out.h >= 0 && out.h <= 100)) delete out.h;
+      return out.t == null && out.h == null ? null : out;
+    }
+
+    // 화면에 보여 줄 센서 목록 (서버가 있으면 서버 값, 없으면 Web Serial 값)
+    const allSensors = () => (sensorSrv.available ? sensorSrv.list : webSensors);
+    const sensorFresh = (x) => x.at && Date.now() - x.at < SENSOR_STALE_MS && !x.error;
+
+    async function pollSensors() {
+      if (!/^https?:$/.test(location.protocol) || sensorSrv.available === false) return;
+      if (Date.now() - sensorSrv.lastTry < (sensorSrv.available ? 1800 : 10000)) return;
+      sensorSrv.lastTry = Date.now();
+      try {
+        const r = await fetch("api/sensors", { cache: "no-store", signal: AbortSignal.timeout(1500) });
+        if (r.status === 404) { sensorSrv.available = false; return; } // 센서 기능이 없는 서버 (Live Server 등)
+        const j = await r.json();
+        const first = !sensorSrv.available;
+        sensorSrv.available = true;
+        sensorSrv.list = j.sensors.map((x) => ({ ...x, t: x.t, h: x.h, at: x.at, error: x.error }));
+        if (first) {
+          addLog(null, "sys", `아두이노 온습도 센서 자동 연결 (화면 서버) — ${j.sensors.length}대`);
+          for (const w of [...webSensors]) disconnectSensor(w, true); // 같은 포트를 두 곳에서 열지 않도록
+        }
+      } catch (e) { /* 다음에 다시 확인 */ }
+    }
+
+    async function connectSensor(port, quiet) {
+      if (sensorConnecting) return;
+      sensorConnecting = true;
+      try {
+        if (!("serial" in navigator)) throw new Error("이 브라우저는 아두이노 연결(Web Serial)을 지원하지 않습니다. Chrome 으로 여세요");
+        if (!port) port = await navigator.serial.requestPort();
+        if (webSensors.some((w) => w.port === port)) return;
+        const baud = Number(cfg.sensorBaud) || 9600;
+        await port.open({ baudRate: baud });
+        const w = { port, name: "", t: null, h: null, at: 0, error: "" };
+        webSensors.push(w);
+        webSensors.forEach((x, i) => { x.name = `아두이노 ${i + 1}`; });
+        addLog(null, "sys", `${w.name} 온습도 센서 연결 (${baud}bps)`);
+        if (!quiet) showToast(`${w.name}를 연결했습니다.`);
+        readSensor(w);
+      } catch (e) {
+        if (e.name !== "NotFoundError" && !quiet) showToast(`센서 연결 실패: ${e.name === "InvalidStateError" ? "포트가 이미 사용 중" : e.message}`);
+      } finally {
+        sensorConnecting = false;
+        render();
+      }
+    }
+
+    async function readSensor(w) {
+      const decoder = new TextDecoderStream();
+      w.closed = w.port.readable.pipeTo(decoder.writable).catch(() => {});
+      const reader = decoder.readable.getReader();
+      w.reader = reader;
+      let buf = "";
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += value;
+          const lines = buf.split(/\r?\n/);
+          buf = lines.pop();
+          for (const line of lines) {
+            const r = parseSensorLine(line.trim());
+            if (!r) continue;
+            if (r.t === 0 && r.h === 0) { w.error = "센서 값이 0 — 센서 배선·핀 번호 확인"; continue; }
+            if (r.t != null) w.t = r.t;
+            if (r.h != null) w.h = r.h;
+            w.at = Date.now();
+            w.error = "";
+          }
+          if (buf.length > 1000) buf = "";
+        }
+      } catch (e) {
+        w.error = "센서 연결이 끊겼습니다";
+      } finally {
+        reader.releaseLock();
+      }
+    }
+
+    async function disconnectSensor(w, silent) {
+      const i = webSensors.indexOf(w);
+      if (i < 0) return;
+      webSensors.splice(i, 1);
+      try {
+        if (w.reader) await w.reader.cancel();
+        await w.closed;
+        await w.port.close();
+      } catch (e) { /* 이미 뽑힌 경우 */ }
+      if (!silent) { addLog(null, "sys", `${w.name} 연결 해제`); render(); }
+    }
+
+    // 화면 서버가 없을 때만: 예전에 허락한 아두이노들은 꽂혀 있으면 자동 연결
+    async function initSensor() {
+      await pollSensors();
+      if (sensorSrv.available || !("serial" in navigator)) return;
+      navigator.serial.getPorts().then((ports) => ports.forEach((p) => connectSensor(p, true))).catch(() => {});
+      navigator.serial.addEventListener("connect", (e) => { if (!sensorSrv.available) connectSensor(e.target, true); });
+      navigator.serial.addEventListener("disconnect", (e) => {
+        const w = webSensors.find((x) => x.port === e.target);
+        if (w) { disconnectSensor(w, true); addLog(null, "sys", `${w.name} USB 연결 끊김`); }
+      });
     }
 
     /* ---------------- 실제 카메라 · 사람 인식 (COCO-SSD) ---------------- */
@@ -2898,12 +3391,8 @@
       }
       // 브라우저 카메라의 실제 사람 인식(COCO-SSD)은 레고에 맞지 않고 무거우므로 기본으로 끔 (설정에서 켤 수 있음).
       // 레고 피규어 개별 탐지는 AI 서버(🤖)에 연결했을 때 서버에서 한다.
-      if (!cfg.cocoPerson) {
-        live.ready = true;
-        live.noDetect = true;
-        addLog(site, "sys", `${camId} ${live.label} 연결 — 영상만 표시 (레고 탐지는 🤖 AI 서버 연결 시)`);
-        return showToast(`${camId} 영상을 연결했습니다. 레고 탐지는 🤖 AI 서버에 연결하면 동작합니다.`);
-      }
+      // 기본: 브라우저 안에서 티처블 머신 모델 + 레고 탐지 (AI 서버 불필요). 설정에서 COCO-SSD 를 켠 경우만 아래 사람 인식.
+      if (!cfg.cocoPerson) return startLocal(site, k, live);
       addLog(site, "sys", `${camId} ${live.label} 연결 — AI 사람 인식(COCO-SSD) 시작`);
       showToast(`${camId} AI 사람 인식 모델을 불러오는 중입니다…`);
 
@@ -2949,6 +3438,12 @@
       if (!live) return;
       if (live.kind === "ai") return aiDetach(silent);
       site.lives[k] = null;
+      if (live.kind === "local" && !live.dup) site.lives.forEach((l, i) => { if (l && l.dup && l.srcK === k) site.lives[i] = null; });
+      if (live.dup) {
+        syncPeople(site);
+        if (!silent) { addLog(site, "sys", `${cams(site)[k].id} 복제 화면 해제`); rebuildTiles(); }
+        return; // 복제 화면은 원본 영상을 공유하므로 영상은 멈추지 않음
+      }
       syncPeople(site);
       if (calMode && calMode.k === k) calMode = null;
       live.video.pause();
@@ -3081,7 +3576,7 @@
     }
 
     /* ---------------- AI 서버 연동 (ai_server/app.py) ----------------
-       Python 서버가 웹캠을 직접 열고 사람수·위험도·낙상 모델을 실행한다. 화면은 영상(MJPEG)과 분석 결과만 받는다.
+       Python 서버가 웹캠을 직접 열고 사람수·위험도·추락 모델을 실행한다. 화면은 영상(MJPEG)과 분석 결과만 받는다.
        같은 웹캠을 브라우저와 서버가 동시에 열지 않도록 AI를 연결하면 그 구역의 브라우저 카메라 연결은 해제된다. */
     function aiDefaultUrl() {
       if (cfg.aiUrl) return cfg.aiUrl;
@@ -3099,7 +3594,7 @@
       openModal({
         title: "🤖 AI 영상 분석 서버",
         ok: ai.site ? "다시 연결" : "연결",
-        body: `<p>Python AI 서버가 웹캠을 열고 사람 수 · 위험 구역 · 낙상 의심 모델로 분석한 결과를 <b>${esc(s.name)}</b>의 CCTV 화면과 경보에 반영합니다.</p>
+        body: `<p>Python AI 서버가 웹캠을 열고 사람 수 · 위험 구역 · 추락 의심 모델로 분석한 결과를 <b>${esc(s.name)}</b>의 CCTV 화면과 경보에 반영합니다.</p>
           <label>AI 서버 주소
             <input id="aiUrlInput" type="url" value="${esc(ai.url || aiDefaultUrl())}" />
           </label>
@@ -3127,21 +3622,19 @@
         }
         return false;
       }
+      // 카메라가 오류 상태로 멈춰 있으면(USB 재연결 등) 연결할 때 자동으로 한 번 다시 시도하게 요청
+      if (st.cameras.some((c) => c.status === "error")) fetch(url + "/api/reconnect", { method: "POST" }).catch(() => {});
       if (ai.site) aiDetach(true);
-      for (const k of [0, 1]) disconnectLive(site, k, true);
+      const real = st.cameras.filter((v) => !v.duplicate_of).slice(0, 2);
+      real.forEach((view, k) => disconnectLive(site, k, true)); // AI 서버 카메라가 들어갈 화면만 비움
       Object.assign(ai, { url, site, ok: true, lastOk: Date.now(), status: st });
       Object.assign(cfg, { aiUrl: url, aiSite: site.name });
       store("bw.cfg", cfg);
-      const views = st.cameras.slice(0, 2);
+      const views = real;
       views.forEach((view, k) => {
-        const img = new Image();
-        img.alt = "";
-        img.src = `${url}/video/${encodeURIComponent(view.id)}?t=${Date.now()}`;
-        $("aiFeeds").appendChild(img);
-        const dupK = view.duplicate_of ? views.findIndex((v) => v.id === view.duplicate_of) : -1;
-        const dup = dupK >= 0 ? camName(site, dupK) : null;
+        const dup = null;
         site.lives[k] = {
-          kind: "ai", k, img, srvId: view.id, srv: view, dup, ready: true, people: [],
+          kind: "ai", k, bmp: null, srvId: view.id, srv: view, dup, ready: true, people: [],
           label: dup ? `${dup} 복제 영상 · AI 분석 화면` : `AI 서버 · ${view.device_name || "카메라"}`
         };
       });
@@ -3164,8 +3657,7 @@
       for (const k of [0, 1]) {
         const l = site.lives[k];
         if (l && l.kind === "ai") {
-          l.img.src = "";
-          l.img.remove();
+          if (l.bmp) l.bmp.close();
           site.lives[k] = null;
         }
       }
@@ -3205,8 +3697,6 @@
           Object.assign(ai, { ok: true, tries: 0, gaveUp: false });
           addLog(site, "sys", "AI 서버 연결 복구 — 분석 재개");
           showToast("AI 서버 연결이 복구되었습니다.");
-          // 끊겼던 MJPEG 영상 다시 받기
-          for (const l of site.lives) if (l && l.kind === "ai") l.img.src = `${ai.url}/video/${encodeURIComponent(l.srvId)}?t=${Date.now()}`;
         }
         applyAI(st);
       } catch (e) {
@@ -3247,8 +3737,8 @@
     }
 
     // 사람 탐지 결과가 쓸 수 있는 상태인지 (state ok + 최근 결과)
-    const personsOk = (l) => !!(ai.ok && l.persons && l.persons.state === "ok" && Date.now() - l.persons.at < PERSON_STALE_MS);
-    const personsBroken = (l) => !!(l.persons && ["error", "disabled", "no_background"].includes(l.persons.state));
+    const personsOk = (l) => !!(l && online(l) && l.persons && l.persons.state === "ok" && Date.now() - l.persons.at < PERSON_STALE_MS);
+    const personsBroken = (l) => !!(l.persons && ["error", "disabled", "no_background", "uncertain"].includes(l.persons.state));
 
     // 재연결 버튼: AI 서버가 끊겼으면 다시 연결, 카메라만 끊겼으면 서버에 카메라 재연결 요청
     async function aiReconnect() {
@@ -3273,7 +3763,7 @@
     const savedZones = store("bw.zone") || {};
     let zoneMode = null;
 
-    const srcLive = (site, l) => (l && l.dup ? site.lives.find((x) => x && x.kind === "ai" && !x.dup) || l : l);
+    const srcLive = (site, l) => (l && l.dup ? site.lives.find((x) => x && x.kind === l.kind && !x.dup) || l : l);
     const zoneOf = (site, k) => savedZones[`${site.name}#${k}`] || null;
 
     function inPoly(pt, poly) {
@@ -3295,8 +3785,8 @@
 
     function askBackground() {
       const site = current;
-      const l = site.lives.find((x) => x && x.kind === "ai" && !x.dup);
-      if (!l) return showToast("AI 서버에 연결된 카메라가 없습니다.");
+      const l = site.lives.find((x) => isAnalyzed(x) && !x.dup);
+      if (!l) return showToast("영상이 연결된 카메라가 없습니다. 먼저 ‘📷 카메라 연결’을 누르세요.");
       openModal({
         title: "🖼 빈 배경 저장",
         ok: "지금 화면을 빈 배경으로 저장",
@@ -3305,8 +3795,13 @@
         async onOk() {
           closeModal();
           try {
-            const j = await (await fetch(`${ai.url}/api/background/${encodeURIComponent(l.srvId)}`, { method: "POST" })).json();
-            if (!j.ok) throw new Error(j.error);
+            if (l.kind === "local") {
+              if (!l.video.videoWidth) throw new Error("영상이 아직 나오지 않습니다");
+              l.lego.setBackground(l.video);
+            } else {
+              const j = await (await fetch(`${ai.url}/api/background/${encodeURIComponent(l.srvId)}`, { method: "POST" })).json();
+              if (!j.ok) throw new Error(j.error);
+            }
             addLog(site, "sys", `${camName(site, l.k)} 빈 배경 저장 — 레고 개별 탐지 시작`, { cam: camName(site, l.k) });
             showToast("빈 배경을 저장했습니다. 이제 레고를 놓으면 PERSON 번호가 표시됩니다.");
           } catch (e) {
@@ -3343,14 +3838,15 @@
     function zoneClick(tile, e) {
       const l = current.lives[Number(tile.dataset.cam)];
       const src = srcLive(current, l);
-      if (!src || src.kind !== "ai" || !src.img.naturalWidth) return showToast("AI 서버 영상이 나오는 CCTV 화면을 누르세요.");
+      const media = src && (src.kind === "local" ? (src.video.videoWidth ? { width: src.video.videoWidth, height: src.video.videoHeight } : null) : src.kind === "ai" ? src.bmp : null);
+      if (!media) return showToast("영상이 나오는 CCTV 화면을 누르세요.");
       if (zoneMode.k == null) zoneMode.k = src.k;
       else if (zoneMode.k !== src.k) return showToast("같은 카메라 화면에서 이어서 누르세요.");
-      const v = src.img;
+      const v = media;
       const rect = tile.getBoundingClientRect();
-      const sc = Math.min(rect.width / v.naturalWidth, rect.height / v.naturalHeight);
-      const x = (e.clientX - rect.left - (rect.width - v.naturalWidth * sc) / 2) / (v.naturalWidth * sc);
-      const y = (e.clientY - rect.top - (rect.height - v.naturalHeight * sc) / 2) / (v.naturalHeight * sc);
+      const sc = Math.min(rect.width / v.width, rect.height / v.height);
+      const x = (e.clientX - rect.left - (rect.width - v.width * sc) / 2) / (v.width * sc);
+      const y = (e.clientY - rect.top - (rect.height - v.height * sc) / 2) / (v.height * sc);
       zoneMode.pts.push([clamp(x), clamp(y)]);
       render();
     }
@@ -3383,16 +3879,35 @@
     // 화면 인원 목록: YOLO 탐지 박스마다 1명 (PERSON 번호 유지). 탐지기를 쓸 수 없으면 TM 분류 인원수로 대신함.
     function aiPeople(l) {
       let list = [];
-      if (!l.dup && ai.ok) {
+      if (!l.dup && online(l)) {
         if (personsOk(l)) {
           list = l.persons.boxes.map((b) => ({ id: `${l.srvId}-${b.id}`, no: b.id, label: b.label, t: null, cam: l.k, score: b.conf, box: b.box }));
-        } else if (personsBroken(l)) {
-          const p = l.srv && l.srv.analysis && l.srv.analysis.people;
-          const n = p && p.state === "ok" ? p.count : 0;
-          list = Array.from({ length: n }, (_, i) => ({ id: `${l.srvId}-tm${i}`, t: null, cam: l.k, score: p.confidence }));
-        }
+        } // 레고 탐지가 불확실·오류면 인원 0 (티처블 머신 사람수 분류로 인원을 채우지 않음)
       }
       l.people = list;
+    }
+
+    /* CCTV 영상 받기: 계속 열린 스트림(MJPEG) 대신 최신 사진을 짧은 요청으로 초당 약 10장 받는다.
+       Chrome 은 한 서버에 동시 연결을 6개까지만 쓰는데(탭끼리 공유), 스트림은 연결을 계속 붙잡아
+       탭을 여러 개 열면 상태 요청이 막혀 'AI 연결 끊김'이 되었다. 복제 화면은 따로 받지 않고, 안 보이는 탭은 받지 않는다. */
+    const FRAME_MS = 100;
+
+    async function pumpFrames() {
+      if (!ai.site || !ai.ok || document.hidden || ai.fbusy) return;
+      ai.fbusy = true;
+      const site = ai.site;
+      try {
+        await Promise.all(site.lives.filter((l) => l && l.kind === "ai" && !l.dup).map(async (l) => {
+          const r = await fetch(`${ai.url}/api/frame/${encodeURIComponent(l.srvId)}`, { cache: "no-store", signal: AbortSignal.timeout(2000) });
+          if (r.status !== 200) return;
+          const bmp = await createImageBitmap(await r.blob());
+          if (site.lives[l.k] !== l) return bmp.close();
+          if (l.bmp) l.bmp.close();
+          l.bmp = bmp;
+        }));
+      } catch (e) { /* 연결 끊김 판단은 pollAI 가 담당 */ } finally {
+        ai.fbusy = false;
+      }
     }
 
     async function pollPersons() {
@@ -3417,21 +3932,18 @@
 
     // CCTV 화면별 표시 문구 ("사람 N명" / 판별 중 / 감지 불확실 / AI 연결 끊김 …)
     function aiCamState(l) {
-      if (!ai.ok) return { text: "AI 연결 끊김", bad: true };
+      if (!online(l)) return { text: "AI 연결 끊김", bad: true };
       const v = l.srv;
+      if (l.kind === "local" && !personsOk(l) && !(l.persons && l.persons.state !== "ok") && !(v && v.analysis))
+        return TM.error ? { text: "AI 모델 로드 실패", error: TM.error } : { text: "AI 모델 불러오는 중" };
       if (!v) return { text: "분석 중단", bad: true };
       if (v.status !== "live") return { text: v.status === "connecting" ? "카메라 연결 중" : "카메라 연결 오류", bad: true, error: v.error };
-      // 기본: YOLO 사람 탐지 인원수
-      if (personsOk(l)) return { text: `감지 인원 ${l.persons.count}명`, n: l.persons.count };
+      // 감지 인원 = 실제로 확인된 레고 박스 수만 (티처블 머신 사람수 분류로 대신하지 않음)
+      if (personsOk(l)) return l.persons.count ? { text: `감지 인원 ${l.persons.count}명`, n: l.persons.count } : { text: "감지 인원 0명", n: 0 };
+      if (l.persons && l.persons.state === "uncertain") return { text: "감지 불확실" };
       if (!personsBroken(l)) return { text: "판별 중" };
-      if (l.persons.state === "no_background") return { text: "빈 배경 저장 필요" };
-      // 탐지기를 쓸 수 없을 때만 Teachable Machine 분류 결과로 대신 표시
-      if (!v.analysis) return { text: "분석 중단", bad: true };
-      const p = v.analysis.people;
-      if (p.state === "pending") return { text: "판별 중" };
-      if (p.state === "uncertain") return { text: "감지 불확실" };
-      if (p.state !== "ok") return { text: "인원 모델 오류", bad: true };
-      return { text: `사람 ${p.count}명 (분류)`, n: p.count };
+      if (l.persons.state === "no_background") return { text: "감지 인원 0명", n: 0 };
+      return { text: "레고 탐지 오류", bad: true, error: l.persons.error };
     }
 
     // 위치 보정: 보정할 카메라 화면에서 그 카메라 구간의 시작(입구 쪽)과 끝(끝단 쪽)을 차례로 눌러 환산 기준을 잡는다
@@ -3440,7 +3952,7 @@
     function calClick(tile, e) {
       const k = Number(tile.dataset.cam);
       const live = current.lives[k];
-      if (live && live.kind === "ai") return showToast("AI 서버 화면은 위치를 주지 않는 분류 모델이라 위치 보정을 쓰지 않습니다.");
+      if (isAnalyzed(live)) return showToast("AI 분석 화면은 위치 보정 대신 ‘⚠ 위험 구역 지정’을 쓰세요.");
       if (!live || !live.video.videoWidth) return showToast("영상이 연결된 CCTV 화면을 누르세요.");
       if (calMode.k == null) calMode.k = k;
       else if (calMode.k !== k) return showToast(`${cams(current)[calMode.k].id} 화면에서 이어서 누르세요.`);
@@ -3473,7 +3985,7 @@
           <canvas></canvas>
           <span class="live-tag ${cam.live && !cam.dup ? "real" : ""}">${cam.dup ? `⧉ ${cam.dup} 복제` : cam.live ? "● LIVE" : cfg.demo ? "시연 화면" : "미연결"}</span>
           <span class="tile-time"></span>
-          <span class="tile-name">${cam.id} · ${esc(site.name)} · ${esc(cam.label)}</span>
+          <span class="tile-name">${cam.id} · ${esc(site.name)} · ${esc(cam.base)}</span>
           <span class="tile-count"></span>
           <button class="tile-full" type="button" title="이 카메라 전체화면" aria-label="전체화면">⛶</button>`;
         container.appendChild(el);
@@ -3679,7 +4191,8 @@
 
     function drawLive(ctx, w, h, site, cam) {
       const live = site.lives[cam.k];
-      const v = live.video || live.img;
+      // AI 서버 화면은 짧은 요청으로 받은 최신 사진(ImageBitmap)을 그림. 복제 화면은 원본 카메라 사진을 같이 씀.
+      const v = live.video || (live.kind === "ai" ? (srcLive(site, live) || live).bmp : null) || {};
       ctx.fillStyle = "#05090d";
       ctx.fillRect(0, 0, w, h);
       const msg = (text, sub, color = "#ff8a8a") => {
@@ -3694,15 +4207,15 @@
         }
         ctx.textAlign = "left";
       };
-      if (live.kind === "ai") {
+      if (isAnalyzed(live)) {
         // 연결이 끊긴 동안 마지막 프레임을 현재 영상처럼 보이지 않게 함
         const st = aiCamState(live);
-        if (!ai.ok) return msg("AI 연결 끊김 · 분석 중단", "AI 서버(ai_server/app.py) 실행 상태를 확인하세요");
+        if (!online(live)) return msg("AI 연결 끊김 · 분석 중단", "AI 서버(ai_server/app.py) 실행 상태를 확인하세요");
         if (st.bad && st.text !== "분석 중단") return msg(st.text, st.error);
       }
-      const mw = v.videoWidth || v.naturalWidth;
-      const mh = v.videoHeight || v.naturalHeight;
-      if (!mw) return live.kind === "ai" ? msg("영상 수신 대기 중…", "", "#c6d2df") : undefined;
+      const mw = v.videoWidth || v.width;
+      const mh = v.videoHeight || v.height;
+      if (!mw) return isAnalyzed(live) ? msg("영상 수신 대기 중…", "", "#c6d2df") : undefined;
       const sc = Math.min(w / mw, h / mh);
       const vw = mw * sc;
       const vh = mh * sc;
@@ -3711,7 +4224,7 @@
       try {
         ctx.drawImage(v, ox, oy, vw, vh);
       } catch (e) { /* MJPEG 프레임 교체 중 */ }
-      if (live.kind === "ai") return drawAIOverlay(ctx, w, h, site, live, { ox, oy, vw, vh });
+      if (isAnalyzed(live)) return drawAIOverlay(ctx, w, h, site, live, { ox, oy, vw, vh });
       const hot = site.risk >= cfg.alertAt;
       for (const p of live.people) {
         drawBox(ctx, ox + p.box[0] * vw, oy + p.box[1] * vh, p.box[2] * vw, p.box[3] * vh, p.score, hot, h);
@@ -3756,7 +4269,7 @@
       }
     }
 
-    // AI 분석 결과를 CCTV 화면 위에 표시 (낙상 의심 > 위험 구역 > 판별 상태)
+    // AI 분석 결과를 CCTV 화면 위에 표시 (추락 의심 > 위험 구역 > 판별 상태)
     // 사람별 초록 박스 + PERSON 번호. 좌표는 원본 프레임 비율이라 영상이 실제로 그려진 영역(ox, oy, vw, vh)에 맞춰 변환.
     // 0.15초마다 오는 박스 사이를 부드럽게 이어 주려고 화면에 그린 위치를 목표 위치 쪽으로 조금씩 옮긴다.
     function drawPersons(ctx, h, live, area, site) {
@@ -3795,9 +4308,9 @@
 
     function drawAIOverlay(ctx, w, h, site, live, area) {
       const a = live.srv && live.srv.analysis;
+      const srcL = srcLive(site, live);
       const inc = site.aiInc;
-      const src = live.dup ? site.lives.find((x) => x && x.kind === "ai" && !x.dup) : live;
-      const mine = inc && src && inc.cam === src.k;
+      const src = srcLive(site, live);
       const fs = Math.max(12, h * 0.05);
       const banner = (text, color) => {
         ctx.fillStyle = color;
@@ -3806,24 +4319,14 @@
         ctx.font = `800 ${fs}px sans-serif`;
         ctx.fillText(text, w * 0.03, h * 0.13 + fs * 1.25);
       };
-      const fallNow = a && a.fall.state === "ok" && a.fall.positive;
-      const dangerNow = a && a.danger.state === "ok" && a.danger.positive;
-      if ((mine && inc.kind === "fall") || fallNow) banner(`⚠ 낙상 의심 감지${a && a.fall.confidence != null ? ` · 낙상 모델 ${Math.round(a.fall.confidence * 100)}%` : ""}`, "rgba(227,78,78,.88)");
+      // 추락 배너는 '지금' 추락(97% 이상 확정)으로 판단되고 화면에 레고가 있을 때만 (레고 0개면 추락 아님, 지난 경보만으로는 띄우지 않음)
+      const legoNone = srcL => personsOk(srcL) && srcL.persons.count === 0;
+      const fallNow = a && a.fall.state === "ok" && a.fall.positive && !legoNone(src || live);
+      if (fallNow) banner(`⚠ 추락 의심 감지${a && a.fall.confidence != null ? ` · 추락 모델 ${Math.round(a.fall.confidence * 100)}%` : ""}`, "rgba(227,78,78,.88)");
       else if (zonePeople(site, live).length) banner(`⚠ 위험 구역 진입 · ${zonePeople(site, live).map((b) => b.label).join(", ")}`, "rgba(233,119,43,.88)");
-      else if ((mine && inc.kind === "danger") || dangerNow) banner(`⚠ 위험 구역 감지${a && a.danger.confidence != null ? ` · 위험도 모델 ${Math.round(a.danger.confidence * 100)}%` : ""}`, "rgba(233,119,43,.88)");
       drawZone(ctx, h, site, live, area);
       drawPersons(ctx, h, live, area, site); // 경보 띠보다 위에 그려 PERSON 번호가 가려지지 않게
-      if (!a) return;
-      // 왼쪽 아래: 세 모델의 현재 판단 (판별 중/확인 필요 포함)
-      const det = personsOk(live) ? `${live.persons.count}명` : live.persons && live.persons.state === "no_background" ? "빈 배경 저장 필요" : personsBroken(live) ? "사용 불가" : "판별 중";
-      // 아래쪽 한 줄: 모델 판단 요약 (피규어 박스를 덜 가리도록 한 줄로)
-      const line = `${live.persons && live.persons.mode === "yolo" ? "사람 탐지" : "레고 탐지"} ${det} · TM ${fmtAI(a.people)} · 위험도 ${fmtAI(a.danger)} · 낙상 ${fmtAI(a.fall)}`;
-      const ls = Math.max(9, h * 0.03);
-      ctx.font = `700 ${ls}px sans-serif`;
-      ctx.fillStyle = "rgba(0,0,0,.5)";
-      ctx.fillRect(0, h * 0.82 - ls * 1.2, Math.min(w, ctx.measureText(line).width + ls), ls * 1.6);
-      ctx.fillStyle = "#fff";
-      ctx.fillText(line, ls * 0.5, h * 0.82);
+      // 모델 판단 요약(레고 탐지·TM 인원·추락)과 위험도는 CCTV 영상 위에 표시하지 않음 (위험도 패널에서 확인)
     }
 
     function drawTile(tile, T) {
@@ -3848,7 +4351,7 @@
         ctx.fillStyle = "#6f8296";
         ctx.font = `700 ${Math.max(11, h * 0.05)}px sans-serif`;
         ctx.textAlign = "center";
-        ctx.fillText("카메라 미연결", w / 2, h / 2);
+        ctx.fillText("미연결 · 카메라 설정 필요", w / 2, h / 2);
         ctx.textAlign = "left";
       }
     }
@@ -4169,40 +4672,41 @@
         : `24시간 내 경보 기준 초과 예상 없음 · 최고 ${peak.risk}점 (${peak.hour}시)`);
     }
 
-    // AI 영상 분석 상태: 모델이 내놓는 위험/안위험·낙상/안낙상·인원 분류를 그대로 보여 줌 (기상 위험도 점수와 별도)
+    // AI 영상 분석 상태: 모델이 내놓는 위험/안위험·추락/추락 미감지·인원 분류를 그대로 보여 줌 (기상 위험도 점수와 별도)
     function renderAIPanel(s) {
-      const views = s.lives.filter((l) => l && l.kind === "ai");
+      const views = s.lives.filter(isAnalyzed);
       const src = views.find((l) => !l.dup);
       const inc = s.aiInc;
       let head = "AI 영상 분석 · 미연결";
       let cls = "";
       let rows = [];
       if (views.length) {
-        const a = ai.ok && src && src.srv && src.srv.analysis;
+        const a = src && online(src) && src.srv && src.srv.analysis;
         const f = aiFindings(s);
-        if (inc && inc.kind === "fall") [head, cls] = [`긴급: 낙상 의심${inc.pendingClear ? " · 해제 대기" : ""}`, "hot"];
+        if (inc && inc.kind === "fall") [head, cls] = [`긴급: 추락 의심${inc.pendingClear ? " · 해제 대기" : ""}`, "hot"];
         else if (inc) [head, cls] = [`위험 구역 감지${inc.pendingClear ? " · 해제 대기" : ""}`, "warn"];
-        else if (!ai.ok) [head, cls] = ["AI 연결 끊김 · 분석 중단", "hot"];
+        else if (src && !online(src)) [head, cls] = ["AI 연결 끊김 · 분석 중단", "hot"];
+        else if (!a && src && src.kind === "local") [head, cls] = TM.error ? [`AI 모델 로드 실패 — ${TM.error}`, "hot"] : ["AI 모델 불러오는 중…", ""];
         else if (!a) [head, cls] = [src && src.srv && src.srv.status !== "live" ? "카메라 연결 오류 · 분석 중단" : "분석 중단", "hot"];
         else if (f && f.normal) head = "AI 판단: 정상 · 평시 감시";
         else head = "AI 판단: 판별 중 · 확인 필요";
         const val = (r, bad) => !a ? `<b class="off">–</b>` : !r ? `<b class="off">분석 없음</b>`
           : `<b class="${r.state !== "ok" ? "off" : bad(r) ? "hot" : "ok"}">${esc(fmtAI(r))}</b>`;
         rows = [
-          [src && src.persons && src.persons.mode === "yolo" ? "사람 탐지 (YOLO)" : "레고 피규어 탐지", !a ? `<b class="off">–</b>` : personsOk(src)
-            ? `<b class="${src.persons.count ? "hot" : "ok"}">${src.persons.count}명${src.persons.count ? ` · ${src.persons.boxes.map((b) => b.label).join(", ")}` : ""}</b>`
-            : src.persons && src.persons.state === "no_background" ? `<b class="warn">빈 배경 저장 필요</b>`
+          [src && src.persons && src.persons.mode === "yolo" ? "사람 탐지 (YOLO)" : "사람 탐지", !a ? `<b class="off">–</b>` : personsOk(src)
+            ? (src.persons.count ? `<b class="hot">${src.persons.count}명 · ${src.persons.boxes.map((b) => b.label).join(", ")}</b>` : `<b class="ok">사람 감지 대기 · 감지 인원 0명</b>`)
+            : src.persons && src.persons.state === "uncertain" ? `<b class="warn" title="${esc(src.persons.error || "")}">감지 불확실 — ${esc((src.persons.error || "").slice(0, 40))}</b>`
             : personsBroken(src) ? `<b class="hot" title="${esc(src.persons.error || "")}">사용 불가 — ${esc((src.persons.error || "").slice(0, 40))}</b>` : `<b class="off">판별 중</b>`],
-          ["TM 인원 분류 (비교용)", !a || !a.people || a.people.state !== "ok" || !personsOk(src) ? val(a && a.people, () => false)
+          ["인원수", !a || !a.people || a.people.state !== "ok" || !personsOk(src) ? val(a && a.people, () => false)
             : `<b class="${a.people.count === src.persons.count ? "ok" : "warn"}">${esc(fmtAI(a.people))} · 탐지와 ${a.people.count === src.persons.count ? "일치" : "다름"}</b>`],
-          ...(s.lives.filter((l) => l && l.kind === "ai" && !l.dup).length > 1 ? [["전체 인원 (두 카메라)", (() => {
+          ...(s.lives.filter((l) => isAnalyzed(l) && !l.dup).length > 1 ? [["전체 인원 (두 카메라)", (() => {
             const h = headcount(s);
             return h.exact ? `<b class="ok">${h.max}명${h.how ? ` · ${esc(h.how)}` : ""}</b>` : `<b class="warn">추정 ${h.min}~${h.max}명 · 중복 확인 필요 (${esc(h.how)})</b>`;
           })()]] : []),
-          ["위험 구역 (피규어 위치)", !a ? `<b class="off">–</b>` : !zoneOf(s, src.k) ? `<b class="off">구역 미지정</b>`
+          ["위험 구역 ", !a ? `<b class="off">–</b>` : !zoneOf(s, src.k) ? `<b class="off">구역 미지정</b>`
             : zonePeople(s, src).length ? `<b class="hot">진입: ${zonePeople(s, src).map((b) => b.label).join(", ")}</b>` : `<b class="ok">진입 없음</b>`],
-          ["위험도 모델", val(a && a.danger, (r) => r.positive)],
-          ["낙상 모델", val(a && a.fall, (r) => r.positive)]
+          ["위험도", val(a && a.danger, (r) => r.positive)],
+          ["추락", val(a && a.fall, (r) => r.positive)]
         ];
         if (inc) {
           rows.push(["감지", `<b>${esc(camName(s, inc.cam))} · ${fmtTime(inc.fallAt || inc.at)}</b>`]);
@@ -4210,8 +4714,8 @@
           rows.push(["현장 출동 요청", inc.dispAt ? `<b class="ok">접수 ${fmtTime(inc.dispAt)} (시연)</b>` : `<b class="off">요청 전</b>`]);
         }
       }
-      const camText = src ? `${camName(s, src.k)}${src.srv && src.srv.device_name ? ` · ${src.srv.device_name}` : ""}` : "";
-      const canRetry = views.length && (!ai.ok || (src && src.srv && src.srv.status === "error"));
+      const camText = src ? `${camName(s, src.k)} · ${src.kind === "local" ? "브라우저 분석" : src.srv && src.srv.device_name ? src.srv.device_name : "AI 서버"}` : "";
+      const canRetry = src && src.kind === "ai" && (!ai.ok || (src.srv && src.srv.status === "error"));
       const retryBtn = canRetry ? ` <button class="mini-button" data-ai="reconnect" type="button">↻ 재연결</button>` : "";
       const bgBtn = src && src.persons && src.persons.state === "no_background" ? ` <button class="mini-button" data-ai="background" type="button">🖼 빈 배경 저장</button>` : "";
       setHTML($("aiPanel"), `<div class="ai-head ${cls}"><span>${esc(head)}${retryBtn}${bgBtn}</span><span>${esc(camText)}</span></div>`
@@ -4225,7 +4729,7 @@
       setText("riskValue", s.risk);
       $("riskCard").className = "risk-card " + (aiLv || s.lv.key);
       $("riskBadge").className = "badge " + (aiLv || s.lv.key);
-      setText("riskBadge", s.aiInc ? (s.aiInc.kind === "fall" ? "긴급 · 낙상 의심" : `AI 위험 · 기상 ${s.lv.name}`) : s.lv.name);
+      setText("riskBadge", s.aiInc ? (s.aiInc.kind === "fall" ? "긴급 · 추락 의심" : `AI 위험 · 기상 ${s.lv.name}`) : s.lv.name);
       renderAIPanel(s);
       $("riskBar").style.width = `${s.risk}%`;
       $("riskBar").className = "progress-fill " + s.lv.key;
@@ -4255,8 +4759,8 @@
         else if (inc.pendingClear) hint = `${AI_CLEAR_MS / 1000}초 이상 정상 확인 — 조치가 끝났으면 ‘상황 종료’로 해제하세요`;
         else if (inc.dispAt) hint = `현장 출동 요청 접수(시연) 후 ${fmtDur(now - inc.dispAt)} 경과 · 조치가 끝나면 상황을 종료하세요`;
         else if (inc.kind === "fall") hint = inc.ackAt
-          ? `긴급: 낙상 의심 (${cam}) — 담당자 확인 완료. 현장 출동 여부를 판단하세요`
-          : `긴급: 낙상 의심 (${cam}) — 즉시 CCTV 영상을 확인하세요. 경보 현황을 누르면 담당자 확인 창이 열립니다`;
+          ? `긴급: 추락 의심 (${cam}) — 담당자 확인 완료. 현장 출동 여부를 판단하세요`
+          : `긴급: 추락 의심 (${cam}) — 즉시 CCTV 영상을 확인하세요. 경보 현황을 누르면 담당자 확인 창이 열립니다`;
         else if (inc.castAt) hint = `안내 방송 후 ${fmtDur(now - inc.castAt)} 경과 · 인원 ${countText(s)} — 위험 구역 상황을 계속 확인하세요`;
         else hint = `AI 위험 구역 감지 (${cam}) — 안내 방송을 실시하세요`;
       } else if (inc) {
@@ -4274,15 +4778,30 @@
       setText("nextHint", hint);
       $("nextHint").classList.toggle("hot", hot && (!!n || (inc && inc.kind === "fall")));
       $("closeButton").hidden = !inc;
-      // 낙상 의심이면 출동 버튼을 강조하고, 요청 접수 후에는 상태를 표시
+      // 추락 의심이면 출동 버튼을 강조하고, 요청 접수 후에는 상태를 표시
       const fallOpen = inc && inc.kind === "fall" && !inc.dispAt;
       $("dispatchButton").classList.toggle("urgent", !!fallOpen);
       setText("dispatchButton", inc && inc.kind && inc.dispAt ? "✔ 출동 요청 접수 (시연)" : "🚨 현장 출동");
 
       // 기온·습도는 위험도 계산에 쓰지 않는 참고 값 (시연·시뮬레이션 중에는 표시 안 함)
+      // 기온·습도: 아두이노 센서가 있으면 정상 값을 보내는 센서들의 평균(아래에 센서별 값), 없으면 기상 모델 값(참고)
       const air = weather.mode === "live" ? s.obs : {};
-      setText("tempValue", air.temp == null ? "–" : air.temp.toFixed(1));
-      setText("humValue", air.hum == null ? "–" : Math.round(air.hum));
+      const list = allSensors();
+      const ok = list.filter(sensorFresh);
+      const avg = (key) => { const v = ok.map((x) => x[key]).filter((x) => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+      const tv = list.length ? avg("t") : air.temp;
+      const hv = list.length ? avg("h") : air.hum;
+      setText("tempValue", tv == null ? "–" : tv.toFixed(1));
+      setText("humValue", hv == null ? "–" : Math.round(hv));
+      const why = (e) => (/0 —/.test(e) ? "값 0(배선 확인)" : /사용 중/.test(e) ? "다른 창이 사용 중" : /형식이 아님/.test(e) ? `형식 아님 ${(/'(.*)'/.exec(e) || ["", ""])[1]}` : /끊/.test(e) ? "연결 끊김" : "오류");
+      const each = (key, unit) => list.map((x) => `${x.name.replace("아두이노 ", "#")} ${sensorFresh(x) && x[key] != null ? (key === "t" ? x[key].toFixed(1) : Math.round(x[key])) + unit : x.error ? why(x.error) : "응답 없음"}`).join(" · ");
+      setText("tempSrc", list.length ? `${each("t", "℃")}${ok.length ? ` · ${fmtTime(Math.max(...ok.map((x) => x.at)))}` : ""}` : weather.mode === "live" ? "기상 모델 값 (참고)" : "센서 미연결");
+      setText("humSrc", list.length ? each("h", "%") : "");
+      const errs = list.filter((x) => x.error).map((x) => `${x.name}: ${x.error}`).join(" / ");
+      $("tempSrc").title = $("humSrc").title = errs;
+      // 화면 서버가 자동으로 읽는 중이면 버튼이 필요 없음
+      $("sensorButton").hidden = !!sensorSrv.available;
+      setText("sensorButton", webSensors.length ? "🔌 아두이노 추가" : "🔌 아두이노 연결");
       setMetric("wind", s.r.wind, 25, 14, 20, ["보통", "강풍 주의", "강풍 위험"]);
       setMetric("rain", s.r.rain, 40, 15, 30, [s.r.rain < 0.1 ? "비 없음" : "약한 비", "강한 비", "매우 강한 비"]);
       setMetric("wave", s.r.wave, 4, 1.5, 3, ["평온", "높은 파도", "매우 높은 파도"]);
@@ -4292,7 +4811,7 @@
     function render() {
       const s = current;
       const now = Date.now();
-      // 진행 중 경보: 구역별 AI 경보(낙상 의심·위험 구역)와 기상 경보를 각각 1건으로 셈
+      // 진행 중 경보: 구역별 AI 경보(추락 의심·위험 구역)와 기상 경보를 각각 1건으로 셈
       const rows = sites.flatMap((x) => incidents(x).map((inc) => ({ x, inc })));
       const active = rows;
       const allCams = sites.flatMap((x) => cams(x));
@@ -4319,7 +4838,7 @@
       setText("sumCams", String(allCams.length).padStart(2, "0"));
       setText("sumCamsTotal", `/ ${allCams.length}대`);
       // 복제 화면은 실제 카메라 대수에 넣지 않음, AI 서버 카메라는 실제로 영상이 들어올 때만 셈
-      const camOk = (x, c) => { const l = x.lives[c.k]; return l.kind !== "ai" || !aiCamState(l).bad; };
+      const camOk = (x, c) => { const l = x.lives[c.k]; return !isAnalyzed(l) || !aiCamState(l).bad; };
       const real = sites.reduce((a, x) => a + cams(x).filter((c) => c.live && !c.dup && camOk(x, c)).length, 0);
       const dups = allCams.filter((c) => c.dup).length;
       const dupText = dups ? ` · 복제 화면 ${dups}` : "";
@@ -4328,8 +4847,8 @@
         ? (real ? `실제 영상 ${real}대${dupText} · 시연 화면 ${allCams.length - real - dups}대` : "전체 시연 화면 (실제 영상 미연결)")
         : (real ? `실제 영상 ${real}대 연결${dupText}` : dups || ai.site ? "카메라 연결 오류" : "연결된 카메라 없음"));
       setText("sumPeople", peopleExact ? String(people).padStart(2, "0") : `${peopleMin}~${people}`);
-      const aiViews = ai.site ? ai.site.lives.filter((l) => l && l.kind === "ai" && !l.dup) : [];
-      const aiNote = !aiViews.length ? "" : !ai.ok ? " · AI 연결 끊김(인원 미반영)"
+      const aiViews = sites.flatMap((x) => x.lives.filter((l) => isAnalyzed(l) && !l.dup));
+      const aiNote = !aiViews.length ? "" : aiViews.some((l) => !online(l)) ? " · AI 연결 끊김(인원 미반영)"
         : aiViews.some((l) => ["판별 중", "감지 불확실"].includes(aiCamState(l).text)) ? ` · AI ${aiCamState(aiViews[0]).text}` : "";
       setText("sumPeopleNote", peopleExact ? (hotPeople ? `경보 구역 내 ${hotPeople}명` : "경보 구역 내 인원 없음") + aiNote
         : "전체 인원 추정 · 두 카메라 중복 확인 필요");
@@ -4338,10 +4857,10 @@
       setText("sumAlarmNote", need ? `조치 필요 ${need}건` : active.length ? "조치 필요 없음" : "평시 감시 중");
       $("sumAlarmCard").classList.toggle("alarm", active.length > 0);
 
-      // 경보 현황: 낙상 의심 > AI 위험 구역 > 기상 경보, 같은 단계면 인원 있는 곳·위험도 높은 곳 먼저
+      // 경보 현황: 추락 의심 > AI 위험 구역 > 기상 경보, 같은 단계면 인원 있는 곳·위험도 높은 곳 먼저
       const rank = (inc) => (inc.kind === "fall" ? 0 : inc.kind === "danger" ? 1 : 2);
       const ordered = [...rows].sort((a, b) => rank(a.inc) - rank(b.inc) || (b.x.people.length ? 1 : 0) - (a.x.people.length ? 1 : 0) || b.x.risk - a.x.risk);
-      const badge = ({ x, inc }) => (inc.kind === "fall" ? `<span class="badge danger">긴급 낙상 의심</span>`
+      const badge = ({ x, inc }) => (inc.kind === "fall" ? `<span class="badge danger">긴급 추락 의심</span>`
         : inc.kind === "danger" ? `<span class="badge warn">AI 위험 구역</span>` : `<span class="badge ${x.lv.key}">${x.lv.name} ${x.risk}</span>`);
       $("alarmPanel").hidden = !ordered.length;
       setHTML($("alarmList"), ordered.map((r) => `
@@ -4357,13 +4876,16 @@
       const live = liveCams.length > 0;
       setText("cameraLabel", cams(s).map((c) => c.id).join(" · ") + ` · ${s.name}`);
       const aiHere = s.lives.some((l) => l && l.kind === "ai");
+      const localHere = s.lives.some((l) => l && l.kind === "local");
       $("disconnectButton").hidden = !live;
       $("calButton").hidden = !s.lives.some((l) => l && !l.kind);
-      const aiSrc = s.lives.find((l) => l && l.kind === "ai" && !l.dup);
+      const aiSrc = s.lives.find((l) => isAnalyzed(l) && !l.dup);
       $("bgButton").hidden = !(aiSrc && aiSrc.persons && aiSrc.persons.mode === "background");
       $("zoneButton").hidden = !aiSrc;
       setText("zoneButton", zoneMode ? `✔ 구역 저장 (${zoneMode.pts.length}점)` : "⚠ 위험 구역 지정");
-      setText("cctvDisclaimer", aiHere
+      setText("cctvDisclaimer", localHere
+        ? `브라우저 AI 분석 중 (서버 없이) — ${liveCams.map((c) => c.dup ? `${c.id}: ${c.dup} 복제 영상 (별도 카메라 아님)` : `${c.id}: 실제 카메라 영상`).join(" · ")}. 레고는 빈 배경과 비교해 PERSON 번호를 붙이고, 사람수·위험도·추락은 티처블 머신 모델로 판단합니다.`
+        : aiHere
         ? `AI 서버(Python) 영상 분석 중 — ${liveCams.map((c) => c.dup ? `${c.id}: ${c.dup} 복제 영상 (별도 카메라 아님, AI 분석 화면)` : `${c.id}: 실제 카메라 영상`).join(" · ")}. 레고 피규어는 빈 배경과 비교해 개별로 찾아 PERSON 번호를 붙이고, TM 사람수 분류는 비교용으로만 표시합니다.`
         : live && s.lives.every((l) => !l || l.noDetect)
           ? `${liveCams.map((c) => c.id).join("·")} 브라우저 카메라 영상만 표시 중입니다. 레고 피규어 탐지·PERSON 번호는 ‘🤖 AI 서버’에 연결하면 동작합니다.`
@@ -4379,20 +4901,20 @@
         const x = tile.site;
         const l = x.lives[tile.cam.k];
         let n = x.people.filter((p) => (p.cam != null ? p.cam === tile.cam.k : p.t >= tile.cam.a && p.t <= tile.cam.b)).length;
-        let txt = l && l.noDetect ? "탐지 꺼짐 (영상만)" : `사람 ${n}명`;
+        let txt = !l ? (cfg.demo ? `사람 ${n}명` : "미연결") : l.noDetect ? "탐지 꺼짐 (영상만)" : `사람 ${n}명`;
         let flagged = false;
-        if (l && l.kind === "ai") {
+        if (isAnalyzed(l)) {
           // AI 화면: 인원 판별 상태를 그대로 표시, 복제 화면은 원본 카메라 결과임을 표시
           const st = aiCamState(l);
           n = st.n || 0;
           txt = st.text; // 복제 화면은 왼쪽 위 ‘⧉ 복제’ 표시로 구분
-          const tag = l.dup ? `⧉ ${l.dup} 복제` : st.bad ? (ai.ok ? "연결 오류" : "AI 끊김") : "● LIVE";
+          const tag = l.dup ? `⧉ ${l.dup} 복제` : st.bad ? (online(l) ? "연결 오류" : "AI 끊김") : "● LIVE";
           if (tile.tagEl.textContent !== tag) tile.tagEl.textContent = tag;
           tile.tagEl.classList.toggle("real", !l.dup && !st.bad);
-          const src = l.dup ? x.lives.find((y) => y && y.kind === "ai" && !y.dup) : l;
-          flagged = !!(x.aiInc && src && x.aiInc.cam === src.k);
+          const src = srcLive(x, l);
+          flagged = !!(x.aiInc && x.aiInc.kind === "fall" && src && x.aiInc.cam === src.k); // 영상 테두리 강조는 추락 경고만
         }
-        const hot = x.risk >= cfg.alertAt || !!x.aiInc;
+        const hot = x.risk >= cfg.alertAt || !!(x.aiInc && x.aiInc.kind === "fall");
         if (tile.timeEl.textContent !== clock) tile.timeEl.textContent = clock;
         if (tile.countEl.textContent !== txt) tile.countEl.textContent = txt;
         tile.countEl.classList.toggle("hot", hot && n > 0);
@@ -4406,7 +4928,7 @@
       // 시스템 상태
       setHTML($("systemStatus"), `
         <strong>시스템 상태</strong>
-        <div class="${weather.mode === "live" ? "connected" : "degraded"}">● 기상: ${weather.mode === "live" ? "모델 추정값 수신 정상" : "시뮬레이션 값"}</div>
+        <div class="${weather.mode === "live" && !weather.error.includes("값 유지") ? "connected" : "degraded"}">● 기상: ${weather.mode !== "live" ? "시뮬레이션 값" : weather.error.includes("값 유지") ? "수신 실패 · 마지막 실제 값 유지" : "모델 추정값 수신 정상"}</div>
         <div>${weather.mode === "live" ? `Open-Meteo · ${fmtTime(weather.at).slice(0, 5)} 갱신` : weather.error ? "수신 실패 — 10분 후 재시도" : "설정에서 기상 모델 값으로 전환 가능"}${weather.error && weather.mode === "live" ? ` · ${weather.error}` : ""}</div>
         <div>경보 기준: 위험도 ${cfg.alertAt}점 이상</div>
         <div class="${ai.site ? (ai.ok ? "connected" : "degraded") : ""}">● AI 영상 분석: ${ai.site ? (ai.ok ? `연결 정상 · ${esc(ai.site.name)}` : "연결 끊김 — 분석 중단") : "미연결"}</div>`);
@@ -4468,6 +4990,7 @@
     });
     $("streamButton").addEventListener("click", askStream);
     $("aiButton").addEventListener("click", askAI);
+    $("sensorButton").addEventListener("click", () => connectSensor());
     $("bgButton").addEventListener("click", askBackground);
     $("zoneButton").addEventListener("click", toggleZone);
     $("aiPanel").addEventListener("click", (e) => {
@@ -4627,13 +5150,12 @@
       setInterval(fetchWeather, WEATHER_INTERVAL);
       requestAnimationFrame(frame);
       reconnectSaved();
+      initSensor();
+      setInterval(pollSensors, 2000);
       setInterval(pollAI, AI_POLL_MS);
       setInterval(pollPersons, PERSON_POLL_MS);
-      const servedByAI = /^https?:$/.test(location.protocol) && location.port === "5050";
-      if (servedByAI || cfg.aiSite) {
-        const site = sites.find((x) => x.name === cfg.aiSite) || current;
-        aiAttach(site, servedByAI && !cfg.aiUrl ? location.origin : aiDefaultUrl(), true);
-      }
+      setInterval(pumpFrames, FRAME_MS);
+      // 첫 화면은 CAM-01·CAM-02 모두 미연결. AI 서버는 자동으로 붙이지 않고 '🤖 AI 서버' 버튼으로만 연결한다.
     }
 
     start();

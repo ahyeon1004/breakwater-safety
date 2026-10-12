@@ -1,21 +1,9 @@
-"""레고 피규어 개별 탐지 (OpenCV 배경 비교) + 간단한 추적.
+"""레고 피규어 개별 탐지 (노란 머리 색으로 레고 확인 + 빈 배경 보조) + 간단한 추적.
 
-방법: 카메라와 방파제 모형은 고정되어 있으므로, 레고가 없는 '빈 배경' 사진을 한 번 저장해 두고
-현재 화면과 비교해 달라진 덩어리(= 새로 놓인 물체)를 레고 피규어로 본다.
-
-- 색과 상관없이 동작한다 (노란 얼굴·여러 색 옷 모두).
-- 그림자에 덜 민감하도록 밝기 차이(L)는 낮은 가중치, 색 차이(a·b)는 높은 가중치로 비교한다.
-- 피규어의 머리·몸·다리가 따로 잡히지 않도록 가까운 조각은 하나로 합친다.
-- 두 프레임 이상 연속으로 확인된 덩어리만 표시하고(잡음으로 가짜 박스가 생기지 않게),
-  잠깐 놓친 피규어는 hold_sec 동안 박스를 유지한다.
-- 같은 피규어는 위치를 이어 붙여 같은 번호(PERSON n)를 유지한다. 번호는 시연용 임시 번호다.
-
-한계 (정직하게):
-- 레고가 아닌 물체(손, 다른 소품)가 들어와도 '새 물체'로 잡힌다.
-- 피규어 둘이 붙어 있으면 한 덩어리(1명)로 잡힐 수 있다.
-- 카메라가 움직이거나 조명이 크게 바뀌면 빈 배경을 다시 저장해야 한다
-  (화면 대부분이 달라지면 박스를 그리지 않고 '배경 다시 저장 필요' 상태를 낸다).
-- 더 정확하게 하려면 레고 사진에 박스를 그려 YOLO를 추가 학습해야 한다 (README 참고).
+- 1단계: 레고 노란 머리 색(HSV)이 있는 덩어리만 레고 후보로 본다 → 방파제·배경은 PERSON 이 되지 않는다.
+- 2단계(빈 배경이 있을 때): 밝기 보정·색 비율 비교로 원래 있던 노란 물체를 빼고, 머리와 이어진 몸까지 박스를 넓힌다.
+- 3번 연속 확인된 것만 번호(PERSON n)를 붙이고, 잠깐 놓치면 hold_sec 동안 유지한다. 번호는 시연용 임시 번호다.
+- 불확실하면(화면 대부분이 바뀜, 노란 덩어리가 너무 많음) 박스를 그리지 않는다.
 """
 import logging
 import time
@@ -95,21 +83,34 @@ class SimpleTracker:
 
 
 class BackgroundLegoDetector:
+    """레고 피규어 탐지.
+
+    1단계(레고 확인): 레고 피규어의 노란 머리 색(HSV)을 찾는다. 방파제·테트라포드·책상처럼 노란색이 아닌 것은
+            빈 배경과 달라져도 PERSON 으로 표시하지 않는다. 머리 색은 config 의 lego.head_* 로 바꿀 수 있다.
+    2단계(보조, 빈 배경이 저장된 경우만): 빈 배경과 비교해
+        - 원래부터 있던 노란 물체(배경에도 있는 것)는 제외하고
+        - 머리 아래로 이어진 몸 부분까지 박스를 넓힌다.
+        비교할 때 화면 전체 밝기 변화(카메라 자동 노출)를 보정하고, 그림자처럼 밝기만 바뀐 곳은 무시한다(색 비율로 비교).
+    결과가 불확실하면(화면 대부분이 바뀜, 노란 덩어리가 너무 많음) 박스를 그리지 않고 'uncertain' 을 낸다.
+    """
     kind = "background"
+    ok = True  # OpenCV 만 쓰므로 모델 로드 실패가 없음
 
     def __init__(self, cfg, base: Path, cam_id: str):
         self.cfg = cfg
         self.cam_id = cam_id
         self.work_w = int(cfg.get("work_width", 640))
-        self.thr = float(cfg.get("diff_threshold", 32))
-        self.min_area = float(cfg.get("min_area", 0.0005))
-        self.max_area = float(cfg.get("max_area", 0.2))
-        self.merge_px = int(cfg.get("merge_px", 9))
-        self.learn = float(cfg.get("learn_rate", 0.002))
-        self.max_fg = float(cfg.get("max_foreground", 0.35))
+        self.h_lo, self.h_hi = cfg.get("head_hue", [18, 34])      # OpenCV 색상(0~180). 레고 노란색 ≈ 21~28
+        self.s_min = int(cfg.get("head_sat_min", 150))              # 레고 노랑 채도 ≈ 175~215, 사람 피부 ≈ 60~140
+        self.v_min = int(cfg.get("head_val_min", 80))
+        self.head_min = float(cfg.get("head_min_area", 0.00012))  # 화면 대비 머리 최소 넓이
+        self.head_max = float(cfg.get("head_max_area", 0.01))
+        self.chroma_thr = float(cfg.get("chroma_threshold", 0.06))  # 색 비율 차이 기준 (그림자 무시)
+        self.max_fg = float(cfg.get("max_foreground", 0.25))
+        self.max_figures = int(cfg.get("max_figures", 12))
         self.path = (base / cfg.get("background_dir", "backgrounds") / f"{cam_id}.png").resolve()
-        self.tracker = SimpleTracker(float(cfg.get("hold_sec", 0.8)), int(cfg.get("min_hits", 2)))
-        self.bg = None      # 작업 크기의 float32 배경
+        self.tracker = SimpleTracker(float(cfg.get("hold_sec", 0.8)), int(cfg.get("min_hits", 3)))
+        self.bg = None
         self.error = ""
         if self.path.exists():
             img = cv2.imread(str(self.path))
@@ -117,17 +118,15 @@ class BackgroundLegoDetector:
                 self.bg = img.astype(np.float32)
                 log.info("%s: 저장된 빈 배경 불러옴 (%s)", cam_id, self.path.name)
 
-    ok = True  # OpenCV 만 쓰므로 모델 로드 실패가 없음
-
     @property
     def ready(self):
-        return self.bg is not None
+        return True  # 빈 배경 없이도 머리 색으로 탐지 (빈 배경은 정확도 보조)
 
     def _small(self, frame):
         h, w = frame.shape[:2]
         if w != self.work_w:
             frame = cv2.resize(frame, (self.work_w, round(h * self.work_w / w)), interpolation=cv2.INTER_AREA)
-        return cv2.GaussianBlur(frame, (5, 5), 0)
+        return cv2.GaussianBlur(frame, (3, 3), 0)
 
     def set_background(self, frame):
         small = self._small(frame)
@@ -140,39 +139,85 @@ class BackgroundLegoDetector:
     def reset(self):
         self.tracker.reset()
 
-    def update(self, frame, now=None):
-        """반환: (상태, 사람 목록, 오류 메시지). 상태는 ok / no_background / error. now 는 테스트용 시각."""
-        if self.bg is None:
-            return "no_background", [], "빈 배경이 저장되지 않음 — 레고를 모두 치운 뒤 ‘빈 배경 저장’을 누르세요"
-        small = self._small(frame)
-        if small.shape != self.bg.shape:
-            return "error", [], "카메라 해상도가 저장한 빈 배경과 다름 — 빈 배경을 다시 저장하세요"
-        lab_now = cv2.cvtColor(small, cv2.COLOR_BGR2LAB).astype(np.int16)
-        lab_bg = cv2.cvtColor(self.bg.astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.int16)
-        d = np.abs(lab_now - lab_bg).astype(np.float32)
-        diff = np.maximum(d[..., 0] * 0.6, np.maximum(d[..., 1], d[..., 2]) * 1.5)
-        mask = (diff > self.thr).astype(np.uint8) * 255
+    def _foreground(self, small):
+        """빈 배경과 비교한 '새로 생긴 물체' 영역. 밝기 보정 + 색 비율 비교(그림자 무시). (마스크, 바뀐 비율)"""
+        cur = small.astype(np.float32) + 1.0
+        bg = self.bg + 1.0
+        gain = np.median(cur.reshape(-1, 3), axis=0) / np.median(bg.reshape(-1, 3), axis=0)  # 카메라 자동 노출 보정
+        bg = bg * gain
+        cn = cur / cur.sum(axis=2, keepdims=True)   # 색 비율 (밝기와 무관)
+        bn = bg / bg.sum(axis=2, keepdims=True)
+        chroma = np.abs(cn - bn).max(axis=2)
+        lum = np.abs(cur.mean(axis=2) - bg.mean(axis=2))
+        # 색이 달라졌거나(레고 옷 등), 밝기가 아주 크게 달라진 곳만 (그림자·조명은 밝기만 조금 바뀜)
+        mask = ((chroma > self.chroma_thr) | (lum > 70)).astype(np.uint8) * 255
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        k = max(1, self.merge_px)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-        fg = float(mask.mean() / 255)
-        if fg > self.max_fg:
-            self.tracker.reset()
-            return "error", [], f"화면의 {fg:.0%}가 빈 배경과 다름 (카메라 이동·조명 변화) — 빈 배경을 다시 저장하세요"
+        return mask, float(mask.mean() / 255)
 
-        h, w = mask.shape
-        boxes = []
-        n, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+    def update(self, frame, now=None):
+        """반환: (상태, 사람 목록, 메시지). 상태: ok / uncertain / error."""
+        small = self._small(frame)
+        h, w = small.shape[:2]
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        ymask = cv2.inRange(hsv, (int(self.h_lo), self.s_min, self.v_min), (int(self.h_hi), 255, 255))
+        # 끊어진 노란 조각을 먼저 이어 붙인 뒤 잡음 제거 (얇은 연필이 짧은 조각으로 쪼개져 머리처럼 보이지 않게)
+        ymask = cv2.morphologyEx(ymask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        ymask = cv2.morphologyEx(ymask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+
+        fg = None
+        if self.bg is not None and self.bg.shape == small.shape:
+            fg, ratio = self._foreground(small)
+            if ratio > self.max_fg:
+                self.tracker.reset()
+                return "uncertain", [], f"화면의 {ratio:.0%}가 빈 배경과 다름 (카메라 이동·조명 변화) — 빈 배경을 다시 저장하세요"
+
+        # 1단계: 노란 머리 후보
+        heads = []
+        n, _, stats, _ = cv2.connectedComponentsWithStats(ymask)
         for i in range(1, n):
             x, y, bw, bh, area = stats[i]
             frac = area / (w * h)
-            if self.min_area <= frac <= self.max_area:
-                filled = area / float(bw * bh)  # 덩어리가 박스를 얼마나 채우는지 (가는 선·잡음 거르기)
-                if filled >= 0.15:
-                    boxes.append(([x / w, y / h, bw / w, bh / h], None))  # 배경 비교는 모델 신뢰도가 없음
+            if not (self.head_min <= frac <= self.head_max):
+                continue
+            # 레고 머리는 거의 동그란 원기둥 모양: 가로:세로 0.6~1.7, 꽉 찬 덩어리 (길쭉한 연필·막대는 제외)
+            if not (0.6 <= bw / bh <= 1.7) or area / (bw * bh) < 0.45 or bw < 4 or bh < 4:
+                continue
+            if fg is not None and fg[y:y + bh, x:x + bw].mean() / 255 < 0.3:
+                continue  # 빈 배경에도 원래 있던 노란 물체 → 레고 아님
+            heads.append([x, y, bw, bh, area])
+        # 같은 피규어의 손(작은 노란 덩어리)은 머리에 합침: 큰 것부터 머리로 보고, 바로 아래·옆의 작은 것은 제외
+        heads.sort(key=lambda b: -b[4])
+        figs = []
+        for x, y, bw, bh, area in heads:
+            cx = x + bw / 2
+            if any(abs(cx - (f[0] + f[2] / 2)) < 1.6 * f[2] and f[1] - 0.5 * f[3] <= y <= f[1] + 4 * f[3] for f in figs):
+                continue
+            figs.append([x, y, bw, bh, area])
+        if len(figs) > self.max_figures:
+            self.tracker.reset()
+            return "uncertain", [], f"노란 덩어리가 {len(figs)}개로 너무 많음 — 조명·머리 색 설정 확인 필요"
 
-        # 조명이 천천히 바뀌는 것에 맞춰, 물체가 없는 곳의 배경만 아주 조금씩 갱신
-        if self.learn > 0:
-            still = cv2.dilate(mask, np.ones((15, 15), np.uint8)) == 0
-            self.bg[still] = self.bg[still] * (1 - self.learn) + small[still].astype(np.float32) * self.learn
+        boxes = []
+        lab = None
+        if fg is not None:
+            # 새로 생긴 물체 영역(+머리)을 덩어리로 나눔 → 머리와 이어진 덩어리만 그 피규어의 몸으로 봄
+            lab = cv2.connectedComponents(cv2.dilate(cv2.bitwise_or(fg, ymask), np.ones((3, 3), np.uint8)))[1]
+        for x, y, bw, bh, _ in figs:
+            x0, y0, x1, y1 = x, y, x + bw, y + bh
+            if lab is not None:
+                ids = np.unique(lab[y:y + bh, x:x + bw])
+                ids = ids[ids > 0]
+                if len(ids):
+                    # 머리 크기 기준으로 피규어가 있을 수 있는 범위(서 있거나 누운 경우) 안에서만 넓힘
+                    rx0, rx1 = max(0, int(x - 4 * bw)), min(w, int(x + 5 * bw))
+                    ry0, ry1 = max(0, int(y - 2 * bh)), min(h, int(y + 5 * bh))
+                    ys, xs = np.nonzero(np.isin(lab[ry0:ry1, rx0:rx1], ids))
+                    if len(xs):
+                        x0, x1 = min(x0, rx0 + xs.min()), max(x1, rx0 + xs.max() + 1)
+                        y0, y1 = min(y0, ry0 + ys.min()), max(y1, ry0 + ys.max() + 1)
+            boxes.append(([x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h], None))
+
+        if self.bg is not None and fg is not None:
+            still = cv2.dilate(fg, np.ones((15, 15), np.uint8)) == 0
+            self.bg[still] = self.bg[still] * 0.998 + small[still].astype(np.float32) * 0.002
         return "ok", self.tracker.update(boxes, now), ""

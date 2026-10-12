@@ -1,11 +1,12 @@
 """부우산 방파제 안전 관제 — AI 서버 (Flask).
 
-웹캠 영상을 OpenCV로 받아 Teachable Machine 모델 3개(사람수·위험도·낙상)로 분석하고,
+웹캠 영상을 OpenCV로 받아 Teachable Machine 모델 3개(사람수·위험도·추락)로 분석하고,
 기존 관제 화면(index.html)에 결과와 영상을 전달한다.
 
   http://127.0.0.1:5050/            기존 관제 화면 (프로젝트의 index.html 그대로)
   GET  /api/status                  카메라 연결 상태 + 모델 상태 + 카메라별 AI 분석 결과 (화면이 0.5초마다 조회)
-  GET  /video/<CAM-01|CAM-02>       MJPEG 영상
+  GET  /api/frame/<CAM-01|CAM-02>   최신 사진 한 장 (관제 화면이 이 방식으로 영상을 받음)
+  GET  /video/<CAM-01|CAM-02>       MJPEG 영상 (브라우저에서 직접 볼 때용)
   GET  /api/persons                 사람 탐지(YOLO) 박스·PERSON 번호만 빠르게 조회 (화면이 0.15초마다 조회)
   POST /api/speak {"text": ...}     Mac 음성 합성(say)으로 방송 문구 재생 (외부 스피커 장비 제어 아님)
   POST /api/log   {...}             화면의 상황 기록을 logs/events.jsonl 에 저장 (서버를 껐다 켜도 남음)
@@ -43,7 +44,7 @@ def make_detector(pcfg, cam_id):
     - "yolo": 사전 학습 YOLO 의 person 클래스 (실제 사람용. 레고로 추가 학습한 가중치를 weights 에 넣어도 됨)"""
     if pcfg.get("mode", "background") == "yolo":
         return PersonDetector(pcfg.get("yolo", pcfg), HERE)
-    return BackgroundLegoDetector(pcfg.get("background", {}), LOGS, cam_id)
+    return BackgroundLegoDetector(pcfg.get("lego", pcfg.get("background", {})), LOGS, cam_id)
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -91,6 +92,14 @@ class Analyzer(threading.Thread):
                 time.sleep(0.1)
                 continue
             self.last_seq = seq
+            # 검은 화면(카메라 가림·신호 없음)이면 위험도·추락·인원을 판정하지 않음
+            if float(frame.mean()) < 12 and int(frame.max()) < 40:
+                for s in self.smooth.values():
+                    s.clear()
+                self.result = {"ts": time.time(), "frame_ts": ts, "error": "", "dark": True,
+                               **{k: {"state": "no_signal", "label": None, "confidence": None} for k in ("people", "danger", "fall")}}
+                time.sleep(self.interval)
+                continue
             raw = {}
             try:
                 if self.people:
@@ -263,6 +272,12 @@ def index():
     return send_from_directory(ROOT, "index.html")
 
 
+@app.get("/web_models/<path:sub>")
+def web_models(sub):
+    """브라우저 분석용 티처블 머신 모델 (TensorFlow.js 형식)."""
+    return send_from_directory(ROOT / "web_models", sub)
+
+
 @app.get("/obs.json")
 def obs():
     return send_from_directory(ROOT, "obs.json")
@@ -317,6 +332,18 @@ def save_background(cid):
 @app.get("/api/persons")
 def persons():
     return jsonify({"time": time.time(), "cameras": [{"id": v["id"], "persons": persons_of(v)} for v in CAMS.info()]})
+
+
+@app.get("/api/frame/<cid>")
+def frame(cid):
+    """CCTV 최신 사진 한 장 (화면이 초당 약 10번 가져감). 연결을 붙잡지 않아 브라우저 동시 연결 한도에 걸리지 않음."""
+    if cid not in CAMS.views:
+        abort(404)
+    cap, _ = CAMS.views[cid]
+    jpg, seq = cap.latest_jpeg()
+    if jpg is None:
+        return ("", 204)
+    return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store", "X-Frame-Seq": str(seq)})
 
 
 @app.get("/video/<cid>")

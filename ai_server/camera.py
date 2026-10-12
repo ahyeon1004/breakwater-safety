@@ -106,7 +106,8 @@ class Capture(threading.Thread):
         else:
             hint = (self.cfg.get("name_hint") or "").lower()
             order += [i for i, n in enumerate(names) if hint and hint in n.lower()]
-        if dev == "auto" or self.cfg.get("fallback", True):
+        # fallback 이 true 일 때만 이름이 맞지 않는 다른 카메라(맥북 내장 등)도 시도
+        if self.cfg.get("fallback", True):
             order += list(range(MAX_INDEX))
         seen = []
         for i in order:
@@ -131,7 +132,9 @@ class Capture(threading.Thread):
                 log.info("%s: 장치 %s 열기 성공 — %s%s · %dx%d", self.id, i, self.name, "" if self.is_file else "(이름은 추정)", *info)
                 return cap
             reasons.append(f"{i}: {info}")
-        self.error = "카메라를 찾지 못함 — " + "; ".join(reasons) if reasons else "시도할 장치 없음"
+        hint = self.cfg.get("name_hint")
+        self.error = ("카메라를 찾지 못함 — " + "; ".join(reasons)) if reasons else (
+            f"{hint} 카메라가 연결되어 있지 않음 (USB 연결 확인)" if hint else "시도할 장치 없음")
         log.error("%s: %s", self.id, self.error)
         return None
 
